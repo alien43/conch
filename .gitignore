@@ -1,0 +1,27 @@
+# Conch local build and test artifacts
+/conch
+*.log
+*.pid
+tmp-node*.etcd/
+
+# Go binary and build files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+dist/
+
+# Go workspaces
+go.work
+go.work.sum
+
+# IDE and OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
