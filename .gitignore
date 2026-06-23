@@ -4,6 +4,9 @@
 *.pid
 tmp-node*.etcd/
 /default.etcd/
+/coverage-*.txt
+/coverage.txt
+/tmp-coverage/
 
 # Go binary and build files
 *.exe

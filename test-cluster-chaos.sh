@@ -2,6 +2,11 @@
 # test-cluster-chaos.sh - Automated 3-node etcd cluster chaos testing for conch
 set -euo pipefail
 
+export GOCOVERDIR="./tmp-coverage"
+rm -rf "$GOCOVERDIR"
+mkdir -p "$GOCOVERDIR"
+
+
 # Colors for log output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -122,6 +127,12 @@ cleanup() {
     for port in 2379 2380 2381 2382 2383 2384; do
         fuser -k -n tcp "$port" &>/dev/null || true
     done
+
+    # Extract coverage data if any exists
+    if [ -d "$GOCOVERDIR" ] && [ "$(ls -A "$GOCOVERDIR")" ]; then
+        log "Generating binary coverage report from chaos tests..."
+        go tool covdata textfmt -i="$GOCOVERDIR" -o=coverage-chaos.txt
+    fi
 }
 
 # Delete data dirs and log files strictly on a fresh start
@@ -198,8 +209,8 @@ success "3-node etcd cluster is HEALTHY and clustered!"
 "$ETCDCTL_BIN" --endpoints=127.0.0.1:2379 member list
 
 # Re-compile to ensure conch binary is up to date
-log "Rebuilding conch binary..."
-go build -o conch cmd/conch/main.go
+log "Rebuilding conch binary with coverage instrumentation..."
+go build -cover -o conch cmd/conch/main.go
 
 # ---------------------------------------------------------
 # Phase 1: Leadership Election with 3-node Consensus
