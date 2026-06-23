@@ -3,18 +3,45 @@
 [![Go Test Status](https://github.com/alien43/conch/actions/workflows/test.yml/badge.svg)](https://github.com/alien43/conch/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/alien43/conch/graph/badge.svg)](https://codecov.io/gh/alien43/conch)
 
-Distributed coordination wrapper for Linux processes, built on etcd v3. Provides leader election, counting semaphores, and distributed cron without requiring application-level etcd integration.
+## What is Conch?
 
-## Install
+Distributed process supervisor and coordination wrapper (leader election, semaphores, cron) built on etcd v3 for zero-dependency Linux process orchestration.
 
-Pre-built binaries (amd64, arm64) are available on the [releases page](https://github.com/alien43/conch/releases).
+Conch provides distributed coordination wrappers for Linux processes without requiring application-level etcd integration.
 
+## How it works (Architecture)
+
+Conch acts as a supervisor wrapper around your child processes. Under the hood, it interacts with your existing etcd v3 quorum:
+* **Leases & Keepalives**: Conch campaigns for leadership or semaphores by creating keys bound to etcd leases. It runs a background keepalive loop to maintain the hold. If etcd quorum is lost or the network partitions, Conch detects the keepalive failure immediately and terminates the child process group (SIGTERM followed by SIGKILL) to enforce fail-closed behavior.
+* **Watches**: For queuing primitives (like semaphores) and distributed scheduler updates (like cron job additions or deletions), Conch establishes etcd watches to respond immediately to cluster state transitions, minimizing wake-up delays and scheduling overhead.
+* **Fencing Tokens**: Upon winning an election or slot, Conch exports the etcd create-revision as `CONCH_REV` to the child's environment, allowing downstream resources to perform optimistic concurrency checks.
+
+This architecture ensures zero-dependency orchestration—your applications do not need to import etcd SDKs or implement consensus handling themselves.
+
+## Quick Start
+
+### Install
+
+Install the latest version via Go:
+```bash
+go install github.com/alien43/conch/cmd/conch@latest
+```
+
+Or download pre-built binaries:
 ```bash
 sudo curl -fsSL "https://github.com/alien43/conch/releases/latest/download/conch-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
   -o /usr/local/bin/conch && sudo chmod +x /usr/local/bin/conch
 ```
 
-NixOS: use `pkgs.conch` from the flake.
+### Try it out
+
+```bash
+# Campaign for a leader office
+conch elect my-office -- echo "I am the leader!"
+
+# Limit concurrency to 2 slots cluster-wide
+conch sema heavy-jobs --max 2 -- sleep 5
+```
 
 ## Build
 
