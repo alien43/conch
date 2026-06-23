@@ -33,7 +33,14 @@ jobs:
         run: CGO_ENABLED=0 go build -ldflags="-s -w" -o conch cmd/conch/main.go
 
       - name: Run unit & integration tests
-        run: go test -v -race ./...
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.txt
+          fail_ci_if_error: true
 
       - name: Run cluster chaos tests
         run: ./test-cluster-chaos.sh

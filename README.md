@@ -1,5 +1,8 @@
 # conch
 
+[![Go Test Status](https://github.com/alien43/conch/actions/workflows/test.yml/badge.svg)](https://github.com/alien43/conch/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/alien43/conch/graph/badge.svg)](https://codecov.io/gh/alien43/conch)
+
 Distributed coordination wrapper for Linux processes, built on etcd v3. Provides leader election, counting semaphores, and distributed cron without requiring application-level etcd integration.
 
 ## Install
