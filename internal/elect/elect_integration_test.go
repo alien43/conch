@@ -1,8 +1,10 @@
 package elect
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strconv"
@@ -397,5 +399,66 @@ func TestElectHooks(t *testing.T) {
 	}
 	if len(content2) > 0 {
 		t.Errorf("child ran even though on-acquire hook failed. Content: %q", string(content2))
+	}
+}
+
+func TestElectWatch(t *testing.T) {
+	etcd, err := testutil.StartEtcd(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start etcd: %v", err)
+	}
+	defer etcd.Stop()
+
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:   []string{etcd.ClientURL},
+		DialTimeout: 1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to connect to etcd: %v", err)
+	}
+	defer cli.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var buf bytes.Buffer
+	// Redirect Stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = CmdWatch(ctx, cli, "office-watch", false)
+	}()
+
+	// Wait for watch to establish
+	time.Sleep(500 * time.Millisecond)
+
+	// Campaign a leader
+	mockKey := "/conch/v1/elect/office-watch/candidate-key"
+	mockVal := `{"host":"node-watch","pid":12345,"started":"2026-06-14T00:00:00Z"}`
+	_, err = cli.Put(context.Background(), mockKey, mockVal)
+	if err != nil {
+		t.Fatalf("failed to put key: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Cancel context to stop CmdWatch
+	cancel()
+	<-done
+
+	w.Close()
+	os.Stdout = oldStdout
+	_, _ = io.Copy(&buf, r)
+
+	output := buf.String()
+	if !strings.Contains(output, "office-watch -") {
+		t.Errorf("expected initial vacant output, got: %q", output)
+	}
+	if !strings.Contains(output, "office-watch node-watch pid=12345") {
+		t.Errorf("expected leader notification, got: %q", output)
 	}
 }
