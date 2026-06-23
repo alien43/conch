@@ -152,6 +152,29 @@ conch conchd --status-addr :9191
 | 70 | lease lost during run; child was killed |
 | 75 | `--nonblock` or `--wait` expired |
 
+## Why Conch? (Comparison to Alternatives)
+
+Conch provides distributed coordination primitives (`elect`, `sema`, `cron`) as a simple process wrapper. Here is how it compares to other common solutions:
+
+| Feature / Tool | **Conch** | **flock** | **etcdctl lock** | **Nomad / K8s** | **dkron** |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Scope** | Cluster-wide | Local machine | Cluster-wide | Cluster-wide | Cluster-wide |
+| **Child Supervision** | Yes (kills child on lease loss) | Yes (local OS lock) | No (wrapper script must handle loss) | Yes (full platform agent) | Yes (cron only) |
+| **Decentralized** | Yes (etcd quorum) | Yes (local kernel) | Yes (etcd quorum) | No (needs controller nodes) | No (needs dkron nodes) |
+| **Dependencies** | etcd only | None | etcd only | Heavy platform | dkron cluster |
+| **Fencing Tokens** | Yes (`CONCH_REV`) | No | No | Yes (some engines) | No |
+
+### Conch vs. `flock`
+* `flock` is file-based and limited to a single host. `conch` works cluster-wide using etcd consensus. However, `conch` respects the same usage conventions (e.g. `--nonblock` returns exit code `75`, similar to `flock -n`).
+
+### Conch vs. `etcdctl lock` / `consul lock`
+* Standard CLI lockers like `etcdctl lock` only acquire the lock, then run the command without active lease-loss monitoring. If the network partitions and the lease expires in etcd, the runner is not notified, resulting in two nodes running the same exclusive resource (split-brain).
+* `conch` actively keepalives the lease in the background. If the lease is lost or etcd becomes unreachable, `conch` immediately escalates termination (`SIGTERM` followed by `SIGKILL`) to guarantee fail-closed behavior.
+
+### Conch vs. Kubernetes / Nomad / dkron
+* Full-fledged orchestrators require heavy control planes, master nodes, database backends, and agents running on every machine.
+* `conch` is a single static Go binary. If you already have an etcd cluster (which most Kubernetes/Consul/control-plane architectures do), `conch` leverages it directly with zero additional server overhead.
+
 ---
 
 ## Test
