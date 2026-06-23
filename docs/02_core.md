@@ -2,12 +2,13 @@
 
 Everything every tool inherits. This file is authoritative; `00_design.md` sketches.
 
-## 1. Connection
+## 1. Connection & Logging
 
 | Flag | Env | Default |
 | :--- | :--- | :--- |
 | `--endpoints` | `CONCH_ENDPOINTS` | `localhost:2379` |
 | `--dial-timeout` | `CONCH_DIAL_TIMEOUT` | `5s` |
+| `--quiet` | — | `false` |
 
 Plain HTTP (matches the cluster's etcd; no TLS until etcd itself grows it). If no
 endpoint is reachable within the dial timeout: exit **69** without side effects.

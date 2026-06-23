@@ -35,6 +35,9 @@ CONCH_TTL           lease TTL (default: 10s)
 
 Can also be passed as flags.
 
+Other global flags:
+- `--quiet`: suppress log output below `WARN` level.
+
 ---
 
 ## elect
@@ -54,6 +57,8 @@ conch elect <office> [flags] -- <cmd...>
 | `--on-acquire` | — | shell command run on winning the office |
 | `--on-lose` | — | shell command run on losing the office |
 | `--hook-timeout` | 30s | timeout for hook commands |
+| `--json` | off | print output as JSON (for `--who`, `--watch`, `--assert`) |
+| `--min-rev` | 0 | minimum create-revision for `--assert` |
 
 ```bash
 # Run a daemon, restart on failure
@@ -64,10 +69,15 @@ conch elect db-primary --on-acquire "pg_ctl promote" --on-lose "pg_ctl demote" -
 
 # Check who holds the office
 conch elect api-leader --who
+conch elect api-leader --who --json
+
+# Watch leadership changes
 conch elect api-leader --watch
+conch elect api-leader --watch --json
 
 # Assert this host holds the office (exit 0 yes, 1 no, 69 etcd unreachable)
 conch elect api-leader --assert
+conch elect api-leader --assert --min-rev 100 --json
 ```
 
 ---
@@ -86,6 +96,8 @@ conch sema <name> --max N [flags] -- <cmd...>
 | `--spread` | off | at most 1 slot per hostname |
 | `--wait` | forever | give up after this duration |
 | `--nonblock` | off | exit 75 immediately if no slot available |
+| `--kill-after` | 5s | grace period before SIGKILL |
+| `--json` | off | print output as JSON (for `--who`) |
 
 ```bash
 # At most 3 nodes run this at once
@@ -96,6 +108,7 @@ conch sema ingest --max 5 --spread -- /usr/local/bin/ingest
 
 # Check who holds slots
 conch sema heavy-jobs --max 3 --who
+conch sema heavy-jobs --max 3 --who --json
 ```
 
 ---
@@ -118,6 +131,9 @@ conch cron ls [--last] [--json]
 ```bash
 # Run conchd on each cluster node to execute scheduled jobs
 conch conchd
+
+# Run conchd status HTTP API server on port 9191 (can also use CONCH_STATUS_ADDR env var)
+conch conchd --status-addr :9191
 ```
 
 ---

@@ -8,7 +8,7 @@ Distributed cron: a schedule executed by exactly one node per tick. Anyone sched
 conch cron add <name> --schedule '<cron expr>' [--run-ttl 10m] [--quiet] -- <cmd...>
 conch cron ls [--last] [--json]
 conch cron rm <name>
-conch conchd            # the per-node daemon (systemd unit; identical on every node)
+conch conchd [--status-addr :9191] # the per-node daemon (systemd unit; identical on every node)
 ```
 
 ## Job spec
@@ -75,6 +75,63 @@ zombie-job      @hourly       2026-06-12T10:00:00Z  node1        ?     —      
 output goes to the journal of the node that ran it (conchd logs child stdout/stderr via
 slog). Keeping output out of etcd is deliberate: etcd is a coordination store, not a
 log pipeline.
+
+## `conchd` Status HTTP API
+
+When starting `conchd`, you can enable a local/cluster HTTP status server by passing the `--status-addr` flag or setting the `CONCH_STATUS_ADDR` environment variable:
+
+```sh
+conch conchd --status-addr :9191
+```
+
+The daemon will run an HTTP server exposing status endpoints in JSON format:
+
+* **`GET /cron`**: Lists all registered cron jobs with their current status, schedules, last execution details (including duration, exit code, and node), and the next scheduled execution time:
+  ```json
+  [
+    {
+      "name": "db-backup",
+      "schedule": "*/15 * * * *",
+      "next_tick": "2026-06-12T11:00:00Z",
+      "last_tick": "2026-06-12T10:45:00Z",
+      "node": "node3",
+      "exit": 0,
+      "duration": "4.2s"
+    }
+  ]
+  ```
+* **`GET /elect`**: Lists all active leader election offices, showing who currently holds the primary lease, the PID and start time of the supervised process:
+  ```json
+  [
+    {
+      "office": "db-primary",
+      "leader": "node1",
+      "pid": 12053,
+      "started": "2026-06-12T08:00:00Z",
+      "cmd": "postgres",
+      "create_revision": 4512
+    }
+  ]
+  ```
+* **`GET /sema`**: Lists all semaphores, indicating maximum capacities along with holders and queued nodes currently waiting on slot availability:
+  ```json
+  [
+    {
+      "name": "heavy-jobs",
+      "max": 2,
+      "holders": [
+        {
+          "host": "node2",
+          "pid": 9912,
+          "started": "2026-06-12T10:15:00Z",
+          "cmd": "/usr/local/bin/run-job.sh",
+          "create_revision": 8812
+        }
+      ],
+      "waitlist": []
+    }
+  ]
+  ```
 
 ## Failure behavior
 

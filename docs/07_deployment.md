@@ -77,6 +77,13 @@ When deploying upgrades to the `conch` binary or `conchd`:
   ```sh
   conch elect monitor-probe --assert
   ```
+* **Status HTTP API**: If `conchd` has `--status-addr` enabled, query status or health directly via HTTP:
+  ```sh
+  # Query cron, election, or semaphore statuses
+  curl -fsS http://localhost:9191/cron
+  curl -fsS http://localhost:9191/elect
+  curl -fsS http://localhost:9191/sema
+  ```
 * **Dead Man's Snitch**: Register a simple heartbeat cron job to ping an external monitoring endpoint:
   ```sh
   conch cron add heartbeat --schedule '@every 5m' -- curl -fsS https://hchk.io/your-uuid
