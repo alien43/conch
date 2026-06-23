@@ -1,8 +1,10 @@
 package cron
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -461,6 +463,78 @@ func TestCronStatusServer(t *testing.T) {
 		if semaItem.Waitlist[0].Host != "sema-host3" {
 			t.Errorf("expected waitlist 0 host 'sema-host3', got %q", semaItem.Waitlist[0].Host)
 		}
+	}
+}
+
+func captureStdout(f func()) string {
+	r, w, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = w
+
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	f()
+
+	w.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
+}
+
+func TestCronLs(t *testing.T) {
+	etcd, err := testutil.StartEtcd(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start etcd: %v", err)
+	}
+	defer etcd.Stop()
+
+	endpoints := []string{etcd.ClientURL}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: 1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to connect to etcd: %v", err)
+	}
+	defer cli.Close()
+
+	// 1. Add cron job
+	_, err = CmdAdd(ctx, cli, "job1", "*/5 * * * *", "10m", []string{"true"})
+	if err != nil {
+		t.Fatalf("failed to add job: %v", err)
+	}
+
+	// 2. Run CmdLs text mode without last run status
+	outText1 := captureStdout(func() {
+		_, _ = CmdLs(ctx, cli, false, false)
+	})
+	if !strings.Contains(outText1, "NAME") || !strings.Contains(outText1, "SCHEDULE") || !strings.Contains(outText1, "job1") {
+		t.Errorf("unexpected text output: %q", outText1)
+	}
+
+	// 3. Run CmdLs text mode with last run status
+	outText2 := captureStdout(func() {
+		_, _ = CmdLs(ctx, cli, true, false)
+	})
+	if !strings.Contains(outText2, "NAME") || !strings.Contains(outText2, "LAST-TICK") || !strings.Contains(outText2, "DURATION") {
+		t.Errorf("unexpected text output with last: %q", outText2)
+	}
+
+	// 4. Run CmdLs JSON mode
+	outJSON := captureStdout(func() {
+		_, _ = CmdLs(ctx, cli, false, true)
+	})
+	var parsed []map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outJSON)), &parsed); err != nil {
+		t.Fatalf("failed to unmarshal JSON output %q: %v", outJSON, err)
+	}
+	if len(parsed) != 1 || parsed[0]["name"] != "job1" || parsed[0]["schedule"] != "*/5 * * * *" {
+		t.Errorf("unexpected JSON payload: %v", parsed)
 	}
 }
 

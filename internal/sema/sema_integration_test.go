@@ -1,7 +1,10 @@
 package sema
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -187,5 +190,90 @@ func TestSemaMismatchedMax(t *testing.T) {
 	}
 	if !strings.Contains(holder2.key, "/testsema/2/") {
 		t.Errorf("unexpected key for holder2: %s", holder2.key)
+	}
+}
+
+func captureStdout(f func()) string {
+	r, w, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = w
+
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	f()
+
+	w.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
+}
+
+func TestSemaWho(t *testing.T) {
+	etcd, err := testutil.StartEtcd(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start etcd: %v", err)
+	}
+	defer etcd.Stop()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	endpoints := []string{etcd.ClientURL}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: 1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to connect to etcd: %v", err)
+	}
+	defer cli.Close()
+
+	// 1. Vacant sema who (should return code 1)
+	code, err := CmdWho(ctx, cli, "mysema-who", 2, false)
+	if err != nil {
+		t.Fatalf("CmdWho returned error: %v", err)
+	}
+	if code != 1 {
+		t.Errorf("expected exit code 1 for vacant sema, got %d", code)
+	}
+
+	// 2. Win slot and run who
+	sess1, _ := core.NewCoreSession(ctx, endpoints, 1*time.Second, 10*time.Second, logger)
+	defer sess1.Close()
+	holder1 := NewSemaHolder(sess1, "mysema-who", 2, false, `{"host":"node1","pid":1234,"started":"2026-06-23T12:00:00Z"}`, -1)
+	_, err = holder1.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("failed to acquire sema slot: %v", err)
+	}
+
+	// Text format who
+	outText := captureStdout(func() {
+		_, _ = CmdWho(ctx, cli, "mysema-who", 2, false)
+	})
+	if !strings.Contains(outText, "mysema-who[2/2] HELD  node1 pid=1234") {
+		t.Errorf("unexpected text output: %q", outText)
+	}
+
+	// JSON format who
+	outJSON := captureStdout(func() {
+		_, _ = CmdWho(ctx, cli, "mysema-who", 2, true)
+	})
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outJSON)), &parsed); err != nil {
+		t.Fatalf("failed to unmarshal JSON output %q: %v", outJSON, err)
+	}
+	if parsed["name"] != "mysema-who" || parsed["state"] != "HELD" || parsed["host"] != "node1" {
+		t.Errorf("unexpected JSON payload: %v", parsed)
+	}
+
+	// Release and check who is vacant again
+	_ = holder1.Release(ctx)
+	code, _ = CmdWho(ctx, cli, "mysema-who", 2, false)
+	if code != 1 {
+		t.Errorf("expected exit code 1 after release, got %d", code)
 	}
 }
