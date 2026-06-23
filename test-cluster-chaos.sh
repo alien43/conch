@@ -212,6 +212,10 @@ success "3-node etcd cluster is HEALTHY and clustered!"
 log "Rebuilding conch binary with coverage instrumentation..."
 go build -cover -o conch cmd/conch/main.go
 
+log "Running smoke test suite on the cluster..."
+export CONCH_ENDPOINTS="127.0.0.1:2379"
+./conch-smoke.sh
+
 # ---------------------------------------------------------
 # Phase 1: Leadership Election with 3-node Consensus
 # ---------------------------------------------------------
