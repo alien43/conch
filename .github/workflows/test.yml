@@ -1,0 +1,39 @@
+name: Go Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install etcd
+        run: |
+          ETCD_VER=v3.6.12
+          DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
+          curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd.tar.gz
+          mkdir -p /tmp/etcd-download
+          tar -xvf /tmp/etcd.tar.gz -C /tmp/etcd-download --strip-components=1
+          sudo cp /tmp/etcd-download/etcd /usr/local/bin/
+          sudo cp /tmp/etcd-download/etcdctl /usr/local/bin/
+          etcd --version
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o conch cmd/conch/main.go
+
+      - name: Run unit & integration tests
+        run: go test -v -race ./...
+
+      - name: Run cluster chaos tests
+        run: ./test-cluster-chaos.sh
