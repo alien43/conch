@@ -47,7 +47,7 @@ Every node runs an identical `conchd`:
    * **Win** ⇒ run the job through the standard supervision loop (`02_core.md` §4),
      under the conchd session. `CONCH_NAME=<name>`, `CONCH_REV` = txn revision.
    * **Lose** ⇒ do nothing until the next tick. Losing is the normal case ×(N−1).
-4. On child exit, write `/conch/v1/cron/result/<name>/<T>` (TTL 3 days):
+4. On child exit, write `/conch/v1/cron/result/<name>/<T>` (TTL 14 days):
 
    ```json
    {"node":"node3","exit":0,"started":"...","duration":"4.2s"}

@@ -723,7 +723,7 @@ func runJobScheduler(daemonCtx, jobCtx context.Context, logger *slog.Logger, cli
 
 		duration := time.Since(runStart)
 
-		// Write result JSON with TTL 72h
+		// Write result JSON with TTL 14 days (336 hours)
 		resultKey := core.CronResultKey(name, tickUnix)
 		host, _ := os.Hostname()
 
@@ -735,7 +735,7 @@ func runJobScheduler(daemonCtx, jobCtx context.Context, logger *slog.Logger, cli
 		}
 		resultBytes, _ := json.Marshal(resultVal)
 
-		resLease, err := client.Grant(daemonCtx, 72*3600)
+		resLease, err := client.Grant(daemonCtx, 14*24*3600)
 		if err == nil {
 			_, _ = client.Put(daemonCtx, resultKey, string(resultBytes), clientv3.WithLease(resLease.ID))
 		} else {
