@@ -1,6 +1,7 @@
 # conch
 
 [![Go Test Status](https://github.com/alien43/conch/actions/workflows/test.yml/badge.svg)](https://github.com/alien43/conch/actions/workflows/test.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/alien43/conch)](https://goreportcard.com/report/github.com/alien43/conch)
 [![codecov](https://codecov.io/gh/alien43/conch/graph/badge.svg)](https://codecov.io/gh/alien43/conch)
 
 ## What is Conch?
