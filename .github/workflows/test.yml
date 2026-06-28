@@ -30,7 +30,7 @@ jobs:
           etcd --version
 
       - name: Build
-        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o conch cmd/conch/main.go
+        run: CGO_ENABLED=0 go build -cover -coverpkg=./... -ldflags="-s -w" -o conch cmd/conch/main.go
 
       - name: Run unit & integration tests
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
