@@ -189,43 +189,7 @@ func handleElect(args []string) {
 	// Read-only modes do not need a session
 	if *who || *watch || *assert {
 		setupSignalCancel(ctx, cancel)
-
-		cli, err := clientv3.New(clientv3.Config{
-			Endpoints:   endpoints,
-			DialTimeout: dialTimeout,
-		})
-		if err != nil {
-			logger.Error("failed to connect to etcd", "err", err)
-			os.Exit(69)
-		}
-		defer cli.Close()
-
-		if *assert {
-			code, err := elect.CmdAssert(ctx, cli, office, *minRev, *useJSON)
-			if err != nil {
-				logger.Error("assert failed", "err", err)
-				os.Exit(69)
-			}
-			os.Exit(code)
-		}
-
-		if *who {
-			code, err := elect.CmdWho(ctx, cli, office, *useJSON)
-			if err != nil {
-				logger.Error("failed to get leader info", "err", err)
-				os.Exit(69)
-			}
-			os.Exit(code)
-		}
-
-		if *watch {
-			code, err := elect.CmdWatch(ctx, cli, office, *useJSON)
-			if err != nil {
-				logger.Error("failed to watch leader", "err", err)
-				os.Exit(69)
-			}
-			os.Exit(code)
-		}
+		runElectReadOnly(ctx, logger, endpoints, dialTimeout, office, *who, *watch, *assert, *minRev, *useJSON)
 		return
 	}
 
@@ -256,6 +220,46 @@ func handleElect(args []string) {
 	exitCode, _ := elect.RunElect(ctx, logger, endpoints, dialTimeout, ttl, killAfter, *restart, office, waitLimit, 60*time.Second, *onAcquire, *onLose, hookTimeout, childCmd)
 	os.Exit(exitCode)
 }
+
+func runElectReadOnly(ctx context.Context, logger *slog.Logger, endpoints []string, dialTimeout time.Duration, office string, who, watch, assert bool, minRev int64, useJSON bool) {
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: dialTimeout,
+	})
+	if err != nil {
+		logger.Error("failed to connect to etcd", "err", err)
+		os.Exit(69)
+	}
+	defer cli.Close()
+
+	if assert {
+		code, err := elect.CmdAssert(ctx, cli, office, minRev, useJSON)
+		if err != nil {
+			logger.Error("assert failed", "err", err)
+			os.Exit(69)
+		}
+		os.Exit(code)
+	}
+
+	if who {
+		code, err := elect.CmdWho(ctx, cli, office, useJSON)
+		if err != nil {
+			logger.Error("failed to get leader info", "err", err)
+			os.Exit(69)
+		}
+		os.Exit(code)
+	}
+
+	if watch {
+		code, err := elect.CmdWatch(ctx, cli, office, useJSON)
+		if err != nil {
+			logger.Error("failed to watch leader", "err", err)
+			os.Exit(69)
+		}
+		os.Exit(code)
+	}
+}
+
 
 func handleSema(args []string) {
 	fs := flag.NewFlagSet("sema", flag.ExitOnError)

@@ -289,34 +289,7 @@ func CmdWatch(ctx context.Context, client *clientv3.Client, office string, useJS
 				return 1, wresp.Err()
 			}
 
-			for _, ev := range wresp.Events {
-				key := string(ev.Kv.Key)
-				if ev.Type == clientv3.EventTypeDelete {
-					for i, c := range candidates {
-						if c.Key == key {
-							candidates = append(candidates[:i], candidates[i+1:]...)
-							break
-						}
-					}
-				} else {
-					found := false
-					for i, c := range candidates {
-						if c.Key == key {
-							candidates[i].Value = ev.Kv.Value
-							candidates[i].CreateRevision = ev.Kv.CreateRevision
-							found = true
-							break
-						}
-					}
-					if !found {
-						candidates = append(candidates, candidate{
-							Key:            key,
-							CreateRevision: ev.Kv.CreateRevision,
-							Value:          ev.Kv.Value,
-						})
-					}
-				}
-			}
+			candidates = updateCandidates(candidates, wresp.Events)
 
 			// Sort
 			sort.Slice(candidates, func(i, j int) bool {
@@ -341,3 +314,36 @@ func CmdWatch(ctx context.Context, client *clientv3.Client, office string, useJS
 		}
 	}
 }
+
+func updateCandidates(candidates []candidate, events []*clientv3.Event) []candidate {
+	for _, ev := range events {
+		key := string(ev.Kv.Key)
+		if ev.Type == clientv3.EventTypeDelete {
+			for i, c := range candidates {
+				if c.Key == key {
+					candidates = append(candidates[:i], candidates[i+1:]...)
+					break
+				}
+			}
+		} else {
+			found := false
+			for i, c := range candidates {
+				if c.Key == key {
+					candidates[i].Value = ev.Kv.Value
+					candidates[i].CreateRevision = ev.Kv.CreateRevision
+					found = true
+					break
+				}
+			}
+			if !found {
+				candidates = append(candidates, candidate{
+					Key:            key,
+					CreateRevision: ev.Kv.CreateRevision,
+					Value:          ev.Kv.Value,
+				})
+			}
+		}
+	}
+	return candidates
+}
+

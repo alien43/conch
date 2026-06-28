@@ -76,33 +76,10 @@ func (sh *SemaHolder) acquireInternal(ctx context.Context) (int64, error) {
 					return 0, context.DeadlineExceeded // Treat non-block as immediate timeout (exit 75)
 				}
 				// Wait (block or timeout) for our own key to be deleted, then retry
-				watchCtx, watchCancel := context.WithCancel(ctx)
-				watchChan := sh.client.Watch(watchCtx, sh.key, clientv3.WithRev(resp.Header.Revision))
-
-				deleted := false
-				for !deleted {
-					select {
-					case <-sh.sess.DoneCh:
-						watchCancel()
-						return 0, fmt.Errorf("session lost while waiting for spread semaphore slot")
-					case wresp, ok := <-watchChan:
-						if !ok {
-							deleted = true
-							break
-						}
-						if wresp.Err() != nil {
-							watchCancel()
-							return 0, wresp.Err()
-						}
-						for _, ev := range wresp.Events {
-							if ev.Type == clientv3.EventTypeDelete {
-								deleted = true
-								break
-							}
-						}
-					}
+				err := sh.watchKeyDeletion(ctx, sh.key, resp.Header.Revision, "session lost while waiting for spread semaphore slot")
+				if err != nil {
+					return 0, err
 				}
-				watchCancel()
 
 				// Check context done
 				if ctx.Err() != nil {
@@ -166,39 +143,40 @@ func (sh *SemaHolder) acquireInternal(ctx context.Context) (int64, error) {
 			targetKey := string(getResp.Kvs[rank-sh.max].Key)
 
 			// Watch from the revision of our Get response to avoid races
-			watchCtx, watchCancel := context.WithCancel(ctx)
-			watchChan := sh.client.Watch(watchCtx, targetKey,
-				clientv3.WithRev(getResp.Header.Revision),
-			)
-
-			deleted := false
-			for !deleted {
-				select {
-				case <-sh.sess.DoneCh:
-					watchCancel()
-					return 0, fmt.Errorf("session lost while waiting for semaphore slot")
-				case wresp, ok := <-watchChan:
-					if !ok {
-						deleted = true
-						break
-					}
-					if wresp.Err() != nil {
-						watchCancel()
-						return 0, wresp.Err()
-					}
-					for _, ev := range wresp.Events {
-						if ev.Type == clientv3.EventTypeDelete {
-							deleted = true
-							break
-						}
-					}
-				}
+			err = sh.watchKeyDeletion(ctx, targetKey, getResp.Header.Revision, "session lost while waiting for semaphore slot")
+			if err != nil {
+				return 0, err
 			}
-			watchCancel()
 
 			// Check context done
 			if ctx.Err() != nil {
 				return 0, ctx.Err()
+			}
+		}
+	}
+}
+
+func (sh *SemaHolder) watchKeyDeletion(ctx context.Context, targetKey string, startRev int64, sessionErrMsg string) error {
+	watchCtx, watchCancel := context.WithCancel(ctx)
+	defer watchCancel()
+
+	watchChan := sh.client.Watch(watchCtx, targetKey, clientv3.WithRev(startRev))
+
+	for {
+		select {
+		case <-sh.sess.DoneCh:
+			return fmt.Errorf("%s", sessionErrMsg)
+		case wresp, ok := <-watchChan:
+			if !ok {
+				return nil
+			}
+			if wresp.Err() != nil {
+				return wresp.Err()
+			}
+			for _, ev := range wresp.Events {
+				if ev.Type == clientv3.EventTypeDelete {
+					return nil
+				}
 			}
 		}
 	}

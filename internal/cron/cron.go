@@ -400,7 +400,6 @@ func GetSemaStatus(ctx context.Context, client *clientv3.Client) ([]SemaStatusIt
 	return items, nil
 }
 
-
 func CmdLs(ctx context.Context, client *clientv3.Client, showLast, useJSON bool) (int, error) {
 	items, err := GetCronStatus(ctx, client)
 	if err != nil {
@@ -475,6 +474,77 @@ func NewConchd(endpoints []string, dialTimeout, ttl time.Duration, logger *slog.
 	}, nil
 }
 
+func (cd *Conchd) startStatusServer(ctx context.Context) {
+	if cd.StatusAddr == "" {
+		return
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/cron", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items, err := GetCronStatus(r.Context(), cd.client)
+		if err != nil {
+			cd.logger.Error("failed to get cron status", "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(items)
+	})
+
+	mux.HandleFunc("/elect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items, err := GetElectStatus(r.Context(), cd.client)
+		if err != nil {
+			cd.logger.Error("failed to get elect status", "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(items)
+	})
+
+	mux.HandleFunc("/sema", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items, err := GetSemaStatus(r.Context(), cd.client)
+		if err != nil {
+			cd.logger.Error("failed to get sema status", "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(items)
+	})
+
+	server := &http.Server{
+		Addr:    cd.StatusAddr,
+		Handler: mux,
+	}
+
+	go func() {
+		cd.logger.Info("starting cron status server", "addr", cd.StatusAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			cd.logger.Error("status server error", "err", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+}
+
 func (cd *Conchd) Run(ctx context.Context) error {
 	sess, err := core.NewCoreSession(ctx, cd.endpoints, cd.dialTimeout, cd.ttl, cd.logger)
 	if err != nil {
@@ -482,73 +552,7 @@ func (cd *Conchd) Run(ctx context.Context) error {
 	}
 	defer sess.Close()
 
-	if cd.StatusAddr != "" {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/cron", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			items, err := GetCronStatus(r.Context(), cd.client)
-			if err != nil {
-				cd.logger.Error("failed to get cron status", "err", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(items)
-		})
-
-		mux.HandleFunc("/elect", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			items, err := GetElectStatus(r.Context(), cd.client)
-			if err != nil {
-				cd.logger.Error("failed to get elect status", "err", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(items)
-		})
-
-		mux.HandleFunc("/sema", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			items, err := GetSemaStatus(r.Context(), cd.client)
-			if err != nil {
-				cd.logger.Error("failed to get sema status", "err", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(items)
-		})
-
-
-		server := &http.Server{
-			Addr:    cd.StatusAddr,
-			Handler: mux,
-		}
-
-		go func() {
-			cd.logger.Info("starting cron status server", "addr", cd.StatusAddr)
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				cd.logger.Error("status server error", "err", err)
-			}
-		}()
-
-		go func() {
-			<-ctx.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = server.Shutdown(shutdownCtx)
-		}()
-	}
+	cd.startStatusServer(ctx)
 
 	jobs := make(map[string]JobSpec)
 	cancels := make(map[string]context.CancelFunc)

@@ -387,7 +387,7 @@ func TestElectHooks(t *testing.T) {
 	defer os.Remove(tempFile2.Name())
 
 	onAcquireFail := "exit 42"
-	code, err = RunElect(ctx, logger, endpoints, 1*time.Second, 10*time.Second, 2*time.Second, false, "office-hooks-fail", 0, 60*time.Second, onAcquireFail, onLose, 2*time.Second, []string{"sh", "-c", "echo CHILD2 >> " + tempFile2.Name()})
+	code, _ = RunElect(ctx, logger, endpoints, 1*time.Second, 10*time.Second, 2*time.Second, false, "office-hooks-fail", 0, 60*time.Second, onAcquireFail, onLose, 2*time.Second, []string{"sh", "-c", "echo CHILD2 >> " + tempFile2.Name()})
 	if code != 75 {
 		t.Errorf("expected exit code 75 for failed on-acquire, got %d", code)
 	}
