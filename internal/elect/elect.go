@@ -346,4 +346,3 @@ func updateCandidates(candidates []candidate, events []*clientv3.Event) []candid
 	}
 	return candidates
 }
-

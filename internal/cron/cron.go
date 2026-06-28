@@ -595,47 +595,54 @@ func (cd *Conchd) Run(ctx context.Context) error {
 				return fmt.Errorf("watch channel closed")
 			}
 			for _, ev := range wresp.Events {
-				name := strings.TrimPrefix(string(ev.Kv.Key), core.CronJobPrefix())
-				if ev.Type == clientv3.EventTypeDelete {
-					if cancel, ok := cancels[name]; ok {
-						cancel()
-						delete(cancels, name)
-					}
-					delete(jobs, name)
-					cd.logger.Info("job removed", "name", name)
-				} else {
-					var spec JobSpec
-					if err := json.Unmarshal(ev.Kv.Value, &spec); err == nil {
-						oldSpec, exists := jobs[name]
-						if exists && oldSpec.Schedule == spec.Schedule && oldSpec.RunTTL == spec.RunTTL && len(oldSpec.Cmd) == len(spec.Cmd) {
-							cmdChanged := false
-							for i := range spec.Cmd {
-								if spec.Cmd[i] != oldSpec.Cmd[i] {
-									cmdChanged = true
-									break
-								}
-							}
-							if !cmdChanged {
-								// Execution spec is unchanged. Update jobs map for metadata, but do NOT restart scheduler.
-								jobs[name] = spec
-								cd.logger.Debug("job touched but execution spec unchanged; not restarting scheduler", "name", name)
-								continue
-							}
-						}
-
-						if cancel, ok := cancels[name]; ok {
-							cancel()
-						}
-						jobs[name] = spec
-						jobCtx, cancel := context.WithCancel(ctx)
-						cancels[name] = cancel
-						go runJobScheduler(ctx, jobCtx, cd.logger, cd.client, sess, name, spec)
-						cd.logger.Info("job added/updated", "name", name)
-					}
-				}
+				cd.handleWatchEvent(ctx, ev, jobs, cancels, sess)
 			}
 		}
 	}
+}
+
+func (cd *Conchd) handleWatchEvent(ctx context.Context, ev *clientv3.Event, jobs map[string]JobSpec, cancels map[string]context.CancelFunc, sess *core.CoreSession) {
+	name := strings.TrimPrefix(string(ev.Kv.Key), core.CronJobPrefix())
+	if ev.Type == clientv3.EventTypeDelete {
+		if cancel, ok := cancels[name]; ok {
+			cancel()
+			delete(cancels, name)
+		}
+		delete(jobs, name)
+		cd.logger.Info("job removed", "name", name)
+		return
+	}
+
+	var spec JobSpec
+	if err := json.Unmarshal(ev.Kv.Value, &spec); err != nil {
+		return
+	}
+
+	oldSpec, exists := jobs[name]
+	if exists && oldSpec.Schedule == spec.Schedule && oldSpec.RunTTL == spec.RunTTL && len(oldSpec.Cmd) == len(spec.Cmd) {
+		cmdChanged := false
+		for i := range spec.Cmd {
+			if spec.Cmd[i] != oldSpec.Cmd[i] {
+				cmdChanged = true
+				break
+			}
+		}
+		if !cmdChanged {
+			// Execution spec is unchanged. Update jobs map for metadata, but do NOT restart scheduler.
+			jobs[name] = spec
+			cd.logger.Debug("job touched but execution spec unchanged; not restarting scheduler", "name", name)
+			return
+		}
+	}
+
+	if cancel, ok := cancels[name]; ok {
+		cancel()
+	}
+	jobs[name] = spec
+	jobCtx, cancel := context.WithCancel(ctx)
+	cancels[name] = cancel
+	go runJobScheduler(ctx, jobCtx, cd.logger, cd.client, sess, name, spec)
+	cd.logger.Info("job added/updated", "name", name)
 }
 
 func runJobScheduler(daemonCtx, jobCtx context.Context, logger *slog.Logger, client *clientv3.Client, sess *core.CoreSession, name string, spec JobSpec) {

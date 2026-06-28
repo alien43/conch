@@ -106,55 +106,67 @@ func (sh *SemaHolder) acquireInternal(ctx context.Context) (int64, error) {
 		prefix := core.SemaPrefix(sh.name, sh.max)
 
 		for {
-			// 2. Fetch all keys under the prefix sorted by create-revision
-			getResp, err := sh.client.Get(ctx, prefix,
-				clientv3.WithPrefix(),
-				clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortAscend),
-			)
+			rev, acquired, err := sh.checkRankAndWatch(ctx, prefix)
 			if err != nil {
 				return 0, err
 			}
-
-			// Find our rank
-			rank := -1
-			for i, kv := range getResp.Kvs {
-				if string(kv.Key) == sh.key {
-					rank = i
-					break
-				}
-			}
-
-			if rank == -1 {
-				return 0, fmt.Errorf("our key was deleted from etcd")
-			}
-
-			// 3. If rank < N, we hold a slot!
-			if rank < sh.max {
-				sh.acquired = true
-				return getResp.Kvs[rank].CreateRevision, nil
-			}
-
-			// Non-blocking means we don't wait if rank >= max
-			if sh.waitLimit == 0 {
-				return 0, context.DeadlineExceeded // Treat non-block as immediate timeout
-			}
-
-			// 4. Watch for deletion of the key at rank - max
-			targetKey := string(getResp.Kvs[rank-sh.max].Key)
-
-			// Watch from the revision of our Get response to avoid races
-			err = sh.watchKeyDeletion(ctx, targetKey, getResp.Header.Revision, "session lost while waiting for semaphore slot")
-			if err != nil {
-				return 0, err
-			}
-
-			// Check context done
-			if ctx.Err() != nil {
-				return 0, ctx.Err()
+			if acquired {
+				return rev, nil
 			}
 		}
 	}
 }
+
+func (sh *SemaHolder) checkRankAndWatch(ctx context.Context, prefix string) (int64, bool, error) {
+	// 2. Fetch all keys under the prefix sorted by create-revision
+	getResp, err := sh.client.Get(ctx, prefix,
+		clientv3.WithPrefix(),
+		clientv3.WithSort(clientv3.SortByCreateRevision, clientv3.SortAscend),
+	)
+	if err != nil {
+		return 0, false, err
+	}
+
+	// Find our rank
+	rank := -1
+	for i, kv := range getResp.Kvs {
+		if string(kv.Key) == sh.key {
+			rank = i
+			break
+		}
+	}
+
+	if rank == -1 {
+		return 0, false, fmt.Errorf("our key was deleted from etcd")
+	}
+
+	// 3. If rank < N, we hold a slot!
+	if rank < sh.max {
+		sh.acquired = true
+		return getResp.Kvs[rank].CreateRevision, true, nil
+	}
+
+	// Non-blocking means we don't wait if rank >= max
+	if sh.waitLimit == 0 {
+		return 0, false, context.DeadlineExceeded // Treat non-block as immediate timeout
+	}
+
+	// 4. Watch for deletion of the key at rank - max
+	targetKey := string(getResp.Kvs[rank-sh.max].Key)
+
+	// Watch from the revision of our Get response to avoid races
+	err = sh.watchKeyDeletion(ctx, targetKey, getResp.Header.Revision, "session lost while waiting for semaphore slot")
+	if err != nil {
+		return 0, false, err
+	}
+
+	// Check context done
+	if ctx.Err() != nil {
+		return 0, false, ctx.Err()
+	}
+	return 0, false, nil
+}
+
 
 func (sh *SemaHolder) watchKeyDeletion(ctx context.Context, targetKey string, startRev int64, sessionErrMsg string) error {
 	watchCtx, watchCancel := context.WithCancel(ctx)

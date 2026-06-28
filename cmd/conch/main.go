@@ -260,7 +260,6 @@ func runElectReadOnly(ctx context.Context, logger *slog.Logger, endpoints []stri
 	}
 }
 
-
 func handleSema(args []string) {
 	fs := flag.NewFlagSet("sema", flag.ExitOnError)
 
