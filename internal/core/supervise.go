@@ -146,7 +146,11 @@ func runHook(ctx context.Context, logger *slog.Logger, cmdStr string, hookName s
 
 	select {
 	case <-hookCtx.Done():
-		logger.Warn("hook-timeout", "hook", hookName, "name", name, "rev", rev)
+		if errors.Is(hookCtx.Err(), context.DeadlineExceeded) {
+			logger.Warn("hook-timeout", "hook", hookName, "name", name, "rev", rev)
+		} else {
+			logger.Warn("hook-cancelled", "hook", hookName, "name", name, "rev", rev)
+		}
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		<-done
 		return hookCtx.Err()
@@ -186,16 +190,35 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 		logger.Info("released", "name", hold.Name(), "key", hold.Key(), "rev", rev)
 	}()
 
-	childStarted := false
+	// on-lose undoes on-acquire as well as the child, so it runs if either
+	// was started: a promote with no matching demote is the worst outcome.
+	actedAsHolder := false
 	defer func() {
-		if childStarted && cfg.OnLose != "" {
+		if actedAsHolder && cfg.OnLose != "" {
 			_ = runHook(context.Background(), logger, cfg.OnLose, "on-lose", hold.Name(), rev, int64(sess.LeaseID), cfg.HookTimeout)
 		}
 	}()
 
-	// Run on-acquire hook
+	// Run on-acquire hook, supervised by the lease like the child is.
 	if cfg.OnAcquire != "" {
-		if err := runHook(ctx, logger, cfg.OnAcquire, "on-acquire", hold.Name(), rev, int64(sess.LeaseID), cfg.HookTimeout); err != nil {
+		hookCtx, stop := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-sess.DoneCh:
+				stop()
+			case <-hookCtx.Done():
+			}
+		}()
+		actedAsHolder = true
+		err := runHook(hookCtx, logger, cfg.OnAcquire, "on-acquire", hold.Name(), rev, int64(sess.LeaseID), cfg.HookTimeout)
+		stop()
+		if err != nil {
+			select {
+			case <-sess.DoneCh:
+				logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev)
+				return 70, OutcomeHoldLost, nil
+			default:
+			}
 			return 75, OutcomeAcquireFailed, err
 		}
 	}
@@ -220,13 +243,25 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 		fmt.Sprintf("CONCH_LEASE=%x", sess.LeaseID),
 	)
 
+	// The lease may have been lost while on-acquire ran; don't start a child
+	// we can no longer supervise as the holder.
+	select {
+	case <-sess.DoneCh:
+		logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev)
+		return 70, OutcomeHoldLost, nil
+	case <-ctx.Done():
+		logger.Warn("context-cancelled", "name", hold.Name(), "err", ctx.Err(), "rev", rev)
+		return 70, OutcomeContextCancelled, nil
+	default:
+	}
+
 	logger.Info("child-start", "name", hold.Name(), "cmd", strings.Join(cmdArgs, " "), "rev", rev)
 	if err := cmd.Start(); err != nil {
 		logger.Error("failed to start child", "name", hold.Name(), "err", err)
 		return 1, OutcomeExitNormal, err
 	}
+	actedAsHolder = true
 
-	childStarted = true
 	pgid := cmd.Process.Pid
 
 	childDone := make(chan error, 1)

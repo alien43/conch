@@ -1,12 +1,15 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -158,5 +161,159 @@ func TestCoreLeaseLossSupervision(t *testing.T) {
 		t.Errorf("grandchild process %d is still running after process group killed", grandchildPid)
 		// Clean it up just in case
 		_ = syscall.Kill(grandchildPid, syscall.SIGKILL)
+	}
+}
+
+type runResult struct {
+	code    int
+	outcome Outcome
+	err     error
+}
+
+// syncBuffer is a goroutine-safe log sink.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// startHookRun starts etcd and a session (TTL 6s) holding a DummyHolder, then
+// runs RunWithConfig in the background. The returned buffer collects the log.
+func startHookRun(t *testing.T, cfg RunConfig, child []string) (*CoreSession, chan runResult, *syncBuffer) {
+	t.Helper()
+	etcd, err := testutil.StartEtcd(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start etcd: %v", err)
+	}
+	t.Cleanup(etcd.Stop)
+
+	logs := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logs), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	sess, err := NewCoreSession(ctx, []string{etcd.ClientURL}, time.Second, 6*time.Second, logger)
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	t.Cleanup(sess.Close)
+
+	holder := &DummyHolder{sess: sess, name: "hook-lock", key: "/conch/v1/elect/hook-lock"}
+	res := make(chan runResult, 1)
+	go func() {
+		code, outcome, err := RunWithConfig(ctx, logger, sess, holder, child, 2*time.Second, cfg)
+		res <- runResult{code, outcome, err}
+	}()
+	return sess, res, logs
+}
+
+func waitForFile(path string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// TestOnAcquireHookKilledOnLeaseLoss (H2): losing the lease while --on-acquire
+// runs must kill the hook promptly, not after it finishes, and the child must
+// never start.
+func TestOnAcquireHookKilledOnLeaseLoss(t *testing.T) {
+	dir := t.TempDir()
+	hookPid := dir + "/hook.pid"
+	markChild := dir + "/child"
+
+	sess, res, logs := startHookRun(t, RunConfig{
+		OnAcquire:   "echo $$ > " + hookPid + "; exec sleep 20",
+		HookTimeout: 30 * time.Second,
+	}, []string{"touch", markChild})
+
+	if !waitForFile(hookPid, 5*time.Second) {
+		t.Fatalf("on-acquire hook never started")
+	}
+	time.Sleep(time.Second)
+	revoked := time.Now()
+	if _, err := sess.Client.Revoke(context.Background(), sess.LeaseID); err != nil {
+		t.Fatalf("failed to revoke lease: %v", err)
+	}
+
+	// One keepalive detection window at TTL 6s is 2s + 1.5s.
+	var r runResult
+	select {
+	case r = <-res:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("RunWithConfig still running 10s after lease revocation")
+	}
+	elapsed := time.Since(revoked)
+	t.Logf("returned %v after revocation: code=%d outcome=%s err=%v", elapsed, r.code, r.outcome, r.err)
+
+	if elapsed > 4*time.Second {
+		t.Errorf("hook was not cut short: returned %v after lease revocation", elapsed)
+	}
+	if b, err := os.ReadFile(hookPid); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			if syscall.Kill(pid, 0) == nil {
+				t.Errorf("hook process %d still alive after RunWithConfig returned", pid)
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	}
+	// The child may be signalled before it gets to run, so check the log too.
+	if _, err := os.Stat(markChild); err == nil || strings.Contains(logs.String(), "msg=child-start") {
+		t.Errorf("child started although the lease was lost during on-acquire")
+	}
+	if r.code != 70 || r.outcome != OutcomeHoldLost {
+		t.Errorf("expected exit 70 / %s, got %d / %s", OutcomeHoldLost, r.code, r.outcome)
+	}
+}
+
+// TestOnLoseRunsWhenLeaseLostDuringOnAcquire (H2): once --on-acquire has
+// started (e.g. promoted a database), --on-lose must run on loss even though
+// the child never started, and the child must not start.
+func TestOnLoseRunsWhenLeaseLostDuringOnAcquire(t *testing.T) {
+	dir := t.TempDir()
+	markHook := dir + "/hook"
+	markLose := dir + "/lose"
+	markChild := dir + "/child"
+
+	sess, res, logs := startHookRun(t, RunConfig{
+		OnAcquire:   "touch " + markHook + "; sleep 2",
+		OnLose:      "touch " + markLose,
+		HookTimeout: 30 * time.Second,
+	}, []string{"touch", markChild})
+
+	if !waitForFile(markHook, 5*time.Second) {
+		t.Fatalf("on-acquire hook never started")
+	}
+	if _, err := sess.Client.Revoke(context.Background(), sess.LeaseID); err != nil {
+		t.Fatalf("failed to revoke lease: %v", err)
+	}
+
+	select {
+	case r := <-res:
+		t.Logf("code=%d outcome=%s err=%v", r.code, r.outcome, r.err)
+	case <-time.After(15 * time.Second):
+		t.Fatalf("RunWithConfig did not return")
+	}
+	// The child may be signalled before it gets to run, so check the log too.
+	if _, err := os.Stat(markChild); err == nil || strings.Contains(logs.String(), "msg=child-start") {
+		t.Errorf("child started although the lease was lost during on-acquire")
+	}
+	if _, err := os.Stat(markLose); err != nil {
+		t.Errorf("on-lose did not run after on-acquire started and the lease was lost")
 	}
 }

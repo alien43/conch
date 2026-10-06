@@ -36,8 +36,8 @@ conch elect <office> --assert [--min-rev N] [--json]
 ### Transition Hooks (`--on-acquire` / `--on-lose`)
 
 Transition hooks allow executing setup/teardown commands synchronously on leadership transition edges:
-* **`--on-acquire CMD`**: Runs after winning the office, but *before* the child process is started. Inherits the child's environment variables (`CONCH_NAME`, `CONCH_REV`, `CONCH_LEASE`). A non-zero exit code halts execution and is treated as a failed campaign.
-* **`--on-lose CMD`**: Runs after the child has been fully killed/terminated (e.g., after `SIGTERM` -> `SIGKILL` escalation completes). Runs before the wrapper re-campaigns (under `--restart`) or exits. This is a best-effort cleanup; failures are logged but do not halt progress.
+* **`--on-acquire CMD`**: Runs after winning the office, but *before* the child process is started. Inherits the child's environment variables (`CONCH_NAME`, `CONCH_REV`, `CONCH_LEASE`). A non-zero exit code halts execution and is treated as a failed campaign (exit 75). The hook is supervised by the lease like the child: if the lease is lost while it runs, its process group is killed at once, the child is never started, and the wrapper exits 70 (or re-campaigns under `--restart`). The lease is re-checked once more right before the child starts.
+* **`--on-lose CMD`**: Runs after the child has been fully killed/terminated (e.g., after `SIGTERM` -> `SIGKILL` escalation completes). Runs before the wrapper re-campaigns (under `--restart`) or exits. It runs whenever `--on-acquire` *started* or the child started — including when `--on-acquire` failed, was killed by lease loss, or the lease was lost before the child could start — so a promote is always paired with a demote. This is a best-effort cleanup; failures are logged but do not halt progress.
 * **Timeout & Isolation**: Both hooks run in the office holder's process group with group-level isolation and are bounded by `--hook-timeout` (default `30s`). If a hook times out, its process group is killed and the execution is treated as a failure.
 
 ### `--who`
