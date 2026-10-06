@@ -62,6 +62,24 @@ A tick where every node was down is skipped entirely (misfire policy: skip, neve
 queue). The result key's absence next to a claimed fire key is the "died mid-run"
 signature — visible in `cron ls --last`.
 
+### Semantics: consecutive ticks may overlap across nodes
+
+At-most-once is **per tick, not per job**. A node busy with tick T doesn't hold
+anything that stops another node from claiming T+1, so a run that outlasts the
+schedule interval overlaps the next tick's run on a different node — the same thing
+plain cron does on one host. Only `run_ttl` bounds a run. (A single `conchd` never
+overlaps itself: its per-job loop waits for the run to finish and then schedules from
+the next tick after *now*, skipping the ones it missed.) Pinned by
+`TestCronTicksMayOverlapAcrossNodes`.
+
+Jobs that must not overlap: keep `run_ttl` below the interval, or have the command
+take a `conch sema <job> --max 1 --nonblock` around its body (a skipped tick exits 75).
+
+`@every` schedules are computed from each node's own clock (`now + interval`, rounded
+to the second), so nodes can disagree on tick timestamps and both claim "their" tick.
+Use absolute expressions (`0 */6 * * *`) for cluster jobs; see also the reconciler
+note in the parent repo's `docs/backups.md`.
+
 ## `cron ls`
 
 ```

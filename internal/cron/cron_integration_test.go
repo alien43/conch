@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -536,4 +537,76 @@ func TestCronLs(t *testing.T) {
 	if len(parsed) != 1 || parsed[0]["name"] != "job1" || parsed[0]["schedule"] != "*/5 * * * *" {
 		t.Errorf("unexpected JSON payload: %v", parsed)
 	}
+}
+
+// TestCronTicksMayOverlapAcrossNodes (H6) PINS CURRENT BEHAVIOUR: each tick is
+// claimed exactly once, but a node busy with tick T doesn't stop another node
+// claiming T+1, so a run longer than the schedule interval overlaps the next
+// one on a different node (as plain cron would on one host). If tick-skipping
+// is ever added, this test is expected to fail and should be inverted.
+func TestCronTicksMayOverlapAcrossNodes(t *testing.T) {
+	etcd, err := testutil.StartEtcd(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start etcd: %v", err)
+	}
+	defer etcd.Stop()
+
+	endpoints := []string{etcd.ClientURL}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	for i := 0; i < 2; i++ {
+		c, err := NewConchd(endpoints, time.Second, 10*time.Second, logger)
+		if err != nil {
+			t.Fatalf("failed to create conchd %d: %v", i, err)
+		}
+		go func() { _ = c.Run(ctx) }()
+	}
+
+	cli, err := clientv3.New(clientv3.Config{Endpoints: endpoints, DialTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("failed to connect to etcd: %v", err)
+	}
+	defer cli.Close()
+
+	// Each conchd has its own session, so CONCH_LEASE identifies the instance.
+	logFile := t.TempDir() + "/runs.log"
+	script := `s=$(date +%s%N); sleep 5; echo "$CONCH_LEASE $s $(date +%s%N)" >> ` + logFile
+	if _, err := CmdAdd(ctx, cli, "overlap", "@every 2s", "10s", []string{"sh", "-c", script}); err != nil {
+		t.Fatalf("failed to add job: %v", err)
+	}
+
+	time.Sleep(14 * time.Second)
+	cancel()
+
+	b, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("no runs logged: %v", err)
+	}
+	type run struct {
+		node       string
+		start, end int64
+	}
+	var runs []run
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var r run
+		if _, err := fmt.Sscanf(line, "%s %d %d", &r.node, &r.start, &r.end); err == nil {
+			runs = append(runs, r)
+			t.Logf("node=%s start=%s end=%s", r.node, time.Unix(0, r.start).Format("15:04:05.000"), time.Unix(0, r.end).Format("15:04:05.000"))
+		}
+	}
+
+	overlaps := 0
+	for i := range runs {
+		for j := i + 1; j < len(runs); j++ {
+			if runs[i].node != runs[j].node && runs[i].start < runs[j].end && runs[j].start < runs[i].end {
+				overlaps++
+			}
+		}
+	}
+	if overlaps == 0 {
+		t.Errorf("no cross-node overlap among %d runs: ticks may now be skipped while a run is in progress; update docs/05_cron.md and invert this test", len(runs))
+	}
+	t.Logf("%d overlapping cross-node pairs among %d runs", overlaps, len(runs))
 }
