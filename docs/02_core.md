@@ -65,6 +65,11 @@ No restart logic lives in the core; `--restart` loops *around* it (per-tool).
   under `runtime.LockOSThread`: `Pdeathsig` fires when the *forking thread* exits, and
   Go retires locked threads when their goroutine exits, which would kill healthy
   children at random. No equivalent exists outside Linux.
+* **Descendants that leave the process group** (`setsid`, double-fork, daemonizing)
+  survive the group kill on loss. conch does not track them (no cgroups, no `/proc`
+  walking — out of scope by design). Don't daemonize under conch; run conch as the
+  **main process of a systemd unit**, so the default `KillMode=control-group` catches
+  escapees when the unit stops.
 * **Wrapper paused** (SIGSTOP, VM freeze, swap storm). A paused process can't notice it
   lost the lease, and nothing in the wrapper can fix that: the child keeps running while
   a successor starts. The only remedy is **fencing**: pass `CONCH_REV` to whatever the

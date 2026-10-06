@@ -173,8 +173,11 @@ conch conchd --status-addr :9191
 
 On lease loss conch SIGTERMs the child's process group, then SIGKILLs it after
 `--kill-after`. On Linux the child also dies if the wrapper itself is SIGKILLed or
-OOM-killed. Not covered:
+OOM-killed. Two cases are **not** covered:
 
+- **Processes that leave the group** (`setsid`, double-fork, daemons) survive. Don't
+  daemonize under conch, and run conch as the main process of a systemd unit so
+  `KillMode=control-group` catches stragglers.
 - **A paused wrapper** (SIGSTOP, VM freeze) can't react at all. Fence on `CONCH_REV`
   where it matters.
 

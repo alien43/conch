@@ -3,6 +3,9 @@
 package core
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,5 +108,57 @@ func TestChildDiesWithKilledWrapper(t *testing.T) {
 	time.Sleep(5 * time.Second)
 	if !alive(keepPid) {
 		t.Errorf("child %d of a healthy wrapper died early", keepPid)
+	}
+}
+
+// TestSetsidGrandchildEscapesLeaseLoss (H4) pins a known limitation: a
+// descendant that leaves the child's process group (setsid, daemonizing)
+// is not reached by the group kill on lease loss. Run conch as the main
+// process of a systemd unit (KillMode=control-group) to catch these.
+func TestSetsidGrandchildEscapesLeaseLoss(t *testing.T) {
+	etcd, err := testutil.StartEtcd(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start etcd: %v", err)
+	}
+	defer etcd.Stop()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sess, err := NewCoreSession(ctx, []string{etcd.ClientURL}, time.Second, 6*time.Second, logger)
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	defer sess.Close()
+	holder := &DummyHolder{sess: sess, name: "h4", key: "/conch/v1/elect/h4"}
+
+	pidfile := filepath.Join(t.TempDir(), "grandchild.pid")
+	child := []string{"sh", "-c", fmt.Sprintf("setsid sleep 300 & echo $! > %s; sleep 300", pidfile)}
+
+	res := make(chan int, 1)
+	go func() {
+		code, _, _ := Run(ctx, logger, sess, holder, child, 2*time.Second)
+		res <- code
+	}()
+
+	gc := readPid(t, pidfile)
+	defer func() { _ = syscall.Kill(gc, syscall.SIGKILL) }()
+
+	if _, err := sess.Client.Revoke(ctx, sess.LeaseID); err != nil {
+		t.Fatalf("failed to revoke lease: %v", err)
+	}
+	select {
+	case code := <-res:
+		if code != 70 {
+			t.Errorf("expected exit 70 on lease loss, got %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("Run did not return after lease loss")
+	}
+
+	time.Sleep(time.Second)
+	if !alive(gc) {
+		t.Errorf("setsid grandchild %d died: the limitation documented for H4 no longer holds", gc)
 	}
 }
