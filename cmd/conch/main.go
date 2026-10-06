@@ -19,6 +19,10 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
+// version is stamped at build time with -ldflags "-X main.version=<tag>"
+// (.github/workflows/release.yml, flake.nix, the parent repo's nixos/flake.nix).
+var version = "dev"
+
 func getEnvOrDefault(key, defaultVal string) string {
 	if val := os.Getenv(key); val != "" {
 		return val
@@ -43,7 +47,7 @@ func main() {
 	case "conchd":
 		handleConchd(os.Args[2:])
 	case "version", "-v", "--version":
-		fmt.Println("0.1.1")
+		fmt.Println(version)
 		os.Exit(0)
 	case "-h", "--help", "help":
 		printUsageAndExit()

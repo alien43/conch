@@ -14,10 +14,11 @@
       {
         packages.default = pkgs.buildGoModule {
           pname = "conch";
-          version = "0.1.1";
+          version = "0.4.0";
           src = ./.;
           vendorHash = "sha256-VvkBKlLwDe6wnWebQQLx4WwyBwSRPhc5qyVqTeq44Ak=";
           subPackages = [ "cmd/conch" ];
+          ldflags = [ "-X main.version=v${version}" ];
         };
 
         devShells.default = pkgs.mkShell {
