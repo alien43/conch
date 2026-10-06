@@ -14,7 +14,7 @@
       {
         packages.default = pkgs.buildGoModule {
           pname = "conch";
-          version = "0.4.0";
+          version = "0.5.0";
           src = ./.;
           vendorHash = "sha256-VvkBKlLwDe6wnWebQQLx4WwyBwSRPhc5qyVqTeq44Ak=";
           subPackages = [ "cmd/conch" ];

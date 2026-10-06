@@ -69,7 +69,7 @@ Subcommands:
   sema <name> --max N [--wait <dur>] [--nonblock] [--spread] -- <cmd...>
   sema <name> --max N --who [--json]
 
-  cron add <name> --schedule '<cron>' [--run-ttl 10m] -- <cmd...>
+  cron add <name> --schedule '<cron>' [--run-ttl 10m] [--exclusive] -- <cmd...>
   cron rm <name>
   cron ls [--last] [--json]
 
@@ -364,6 +364,7 @@ func handleCron(args []string) {
 
 	schedule := fs.String("schedule", "", "cron schedule expression (for add)")
 	runTTL := fs.String("run-ttl", "10m", "max expected runtime (for add)")
+	exclusive := fs.Bool("exclusive", false, "skip a tick while a previous run is still live on any node (for add)")
 	showLast := fs.Bool("last", false, "show last result info (for ls)")
 	useJSON := fs.Bool("json", false, "print output as JSON")
 
@@ -405,7 +406,7 @@ func handleCron(args []string) {
 			os.Exit(64)
 		}
 
-		code, err := cron.CmdAdd(ctx, cli, name, *schedule, *runTTL, childCmd)
+		code, err := cron.CmdAdd(ctx, cli, name, *schedule, *runTTL, *exclusive, childCmd)
 		if err != nil {
 			logger.Error("failed to add job", "err", err)
 			os.Exit(code)

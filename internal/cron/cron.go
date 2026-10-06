@@ -25,8 +25,13 @@ type JobSpec struct {
 	Schedule string   `json:"schedule"`
 	Cmd      []string `json:"cmd"`
 	RunTTL   string   `json:"run_ttl"`
-	AddedBy  string   `json:"added_by"`
-	AddedAt  string   `json:"added_at"`
+	// Exclusive: a run also holds the per-job lock (core.CronLockKey) on the
+	// conchd session lease, so a tick due while a previous run is still live on
+	// any node is skipped instead of overlapping it. Off by default (plain-cron
+	// semantics); omitempty keeps existing specs byte-identical.
+	Exclusive bool   `json:"exclusive,omitempty"`
+	AddedBy   string `json:"added_by"`
+	AddedAt   string `json:"added_at"`
 }
 
 type ResultJSON struct {
@@ -34,6 +39,9 @@ type ResultJSON struct {
 	Exit     int    `json:"exit"`
 	Started  string `json:"started"`
 	Duration string `json:"duration"`
+	// Skipped: the tick was claimed but not run, because the job is exclusive
+	// and a previous run still held the lock.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 type CronHolder struct {
@@ -57,7 +65,7 @@ func (ch *CronHolder) Key() string {
 	return core.CronFirePrefix(ch.name)
 }
 
-func CmdAdd(ctx context.Context, client *clientv3.Client, name, scheduleExpr, runTTL string, cmdArgs []string) (int, error) {
+func CmdAdd(ctx context.Context, client *clientv3.Client, name, scheduleExpr, runTTL string, exclusive bool, cmdArgs []string) (int, error) {
 	// Validate schedule expression
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	_, err := parser.Parse(scheduleExpr)
@@ -84,11 +92,12 @@ func CmdAdd(ctx context.Context, client *clientv3.Client, name, scheduleExpr, ru
 	}
 
 	spec := JobSpec{
-		Schedule: scheduleExpr,
-		Cmd:      cmdArgs,
-		RunTTL:   runTTL,
-		AddedBy:  fmt.Sprintf("%s@%s", username, host),
-		AddedAt:  time.Now().UTC().Format(time.RFC3339),
+		Schedule:  scheduleExpr,
+		Cmd:       cmdArgs,
+		RunTTL:    runTTL,
+		Exclusive: exclusive,
+		AddedBy:   fmt.Sprintf("%s@%s", username, host),
+		AddedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 
 	bytes, err := json.Marshal(spec)
@@ -125,6 +134,7 @@ type CronStatusItem struct {
 	Node     string `json:"node"`
 	Exit     *int   `json:"exit"`
 	Duration string `json:"duration"`
+	Skipped  bool   `json:"skipped,omitempty"`
 }
 
 func GetCronStatus(ctx context.Context, client *clientv3.Client) ([]CronStatusItem, error) {
@@ -199,6 +209,7 @@ func GetCronStatus(ctx context.Context, client *clientv3.Client) ([]CronStatusIt
 						exitVal := res.Exit
 						item.Exit = &exitVal
 						item.Duration = res.Duration
+						item.Skipped = res.Skipped
 					}
 				}
 			}
@@ -418,6 +429,9 @@ func CmdLs(ctx context.Context, client *clientv3.Client, showLast, useJSON bool)
 				m["node"] = item.Node
 				m["exit"] = item.Exit
 				m["duration"] = item.Duration
+				if item.Skipped {
+					m["skipped"] = true
+				}
 			}
 			output = append(output, m)
 		}
@@ -429,7 +443,9 @@ func CmdLs(ctx context.Context, client *clientv3.Client, showLast, useJSON bool)
 			fmt.Fprintln(w, "NAME\tSCHEDULE\tLAST-TICK\tNODE\tEXIT\tDURATION")
 			for _, item := range items {
 				exitStr := "—"
-				if item.Exit != nil {
+				if item.Skipped {
+					exitStr = "SKIP"
+				} else if item.Exit != nil {
 					exitStr = strconv.Itoa(*item.Exit)
 				} else if item.LastTick != "—" {
 					exitStr = "?"
@@ -619,7 +635,7 @@ func (cd *Conchd) handleWatchEvent(ctx context.Context, ev *clientv3.Event, jobs
 	}
 
 	oldSpec, exists := jobs[name]
-	if exists && oldSpec.Schedule == spec.Schedule && oldSpec.RunTTL == spec.RunTTL && len(oldSpec.Cmd) == len(spec.Cmd) {
+	if exists && oldSpec.Schedule == spec.Schedule && oldSpec.RunTTL == spec.RunTTL && oldSpec.Exclusive == spec.Exclusive && len(oldSpec.Cmd) == len(spec.Cmd) {
 		cmdChanged := false
 		for i := range spec.Cmd {
 			if spec.Cmd[i] != oldSpec.Cmd[i] {
@@ -714,6 +730,21 @@ func runJobScheduler(daemonCtx, jobCtx context.Context, logger *slog.Logger, cli
 		// We won the race! Run the job
 		logger.Info("won race for tick, executing job", "name", name, "tick", tickUnix)
 
+		lockRev, live, err := acquireCronLock(daemonCtx, client, sess, name, holderVal, spec.Exclusive)
+		if err != nil {
+			logger.Error("failed to take exclusive lock; tick not run", "name", name, "tick", tickUnix, "err", err)
+			continue
+		}
+		if live != "" {
+			logger.Warn("skipped tick: previous run still live", "name", name, "tick", tickUnix, "holder", live)
+			writeCronResult(daemonCtx, client, name, tickUnix, ResultJSON{
+				Started:  time.Now().UTC().Format(time.RFC3339),
+				Duration: "0.0s",
+				Skipped:  true,
+			})
+			continue
+		}
+
 		cronHolder := &CronHolder{
 			name: name,
 			rev:  txnResp.Header.Revision,
@@ -731,28 +762,75 @@ func runJobScheduler(daemonCtx, jobCtx context.Context, logger *slog.Logger, cli
 		runCtx, runCancel := context.WithTimeout(daemonCtx, runTTL)
 		exitCode, _, runErr := core.Run(runCtx, logger, sess, cronHolder, spec.Cmd, 5*time.Second)
 		runCancel()
+		releaseCronLock(client, name, lockRev)
 
 		duration := time.Since(runStart)
 
-		// Write result JSON with TTL 14 days (336 hours)
-		resultKey := core.CronResultKey(name, tickUnix)
-		host, _ := os.Hostname()
-
-		resultVal := ResultJSON{
-			Node:     host,
+		writeCronResult(daemonCtx, client, name, tickUnix, ResultJSON{
 			Exit:     exitCode,
 			Started:  runStart.UTC().Format(time.RFC3339),
 			Duration: fmt.Sprintf("%.1fs", duration.Seconds()),
-		}
-		resultBytes, _ := json.Marshal(resultVal)
-
-		resLease, err := client.Grant(daemonCtx, 14*24*3600)
-		if err == nil {
-			_, _ = client.Put(daemonCtx, resultKey, string(resultBytes), clientv3.WithLease(resLease.ID))
-		} else {
-			_, _ = client.Put(daemonCtx, resultKey, string(resultBytes))
-		}
+		})
 
 		logger.Info("completed cron job tick", "name", name, "tick", tickUnix, "exit", exitCode, "err", runErr)
+	}
+}
+
+// acquireCronLock takes the per-job lock for an exclusive job, without
+// waiting. It returns the lock's create revision (0 when the job isn't
+// exclusive), or, when another run holds it, that holder's JSON in live.
+func acquireCronLock(ctx context.Context, client *clientv3.Client, sess *core.CoreSession, name string, holderVal []byte, exclusive bool) (int64, string, error) {
+	if !exclusive {
+		return 0, "", nil
+	}
+	lockKey := core.CronLockKey(name)
+	resp, err := client.Txn(ctx).If(
+		clientv3.Compare(clientv3.CreateRevision(lockKey), "=", 0),
+	).Then(
+		clientv3.OpPut(lockKey, string(holderVal), clientv3.WithLease(sess.LeaseID)),
+	).Else(
+		clientv3.OpGet(lockKey),
+	).Commit()
+	if err != nil {
+		return 0, "", err
+	}
+	if !resp.Succeeded {
+		live := "unknown"
+		if kvs := resp.Responses[0].GetResponseRange().Kvs; len(kvs) > 0 {
+			live = string(kvs[0].Value)
+		}
+		return 0, live, nil
+	}
+	return resp.Header.Revision, "", nil
+}
+
+// releaseCronLock deletes the per-job lock if it is still the one this run
+// took. If the session was lost meanwhile, the lease already removed it and
+// another run may hold a newer lock, which this must not touch.
+func releaseCronLock(client *clientv3.Client, name string, lockRev int64) {
+	if lockRev == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lockKey := core.CronLockKey(name)
+	_, _ = client.Txn(ctx).If(
+		clientv3.Compare(clientv3.CreateRevision(lockKey), "=", lockRev),
+	).Then(
+		clientv3.OpDelete(lockKey),
+	).Commit()
+}
+
+// writeCronResult stores a tick's result for 14 days.
+func writeCronResult(ctx context.Context, client *clientv3.Client, name string, tickUnix int64, res ResultJSON) {
+	res.Node, _ = os.Hostname()
+	resultBytes, _ := json.Marshal(res)
+	resultKey := core.CronResultKey(name, tickUnix)
+
+	resLease, err := client.Grant(ctx, 14*24*3600)
+	if err == nil {
+		_, _ = client.Put(ctx, resultKey, string(resultBytes), clientv3.WithLease(resLease.ID))
+	} else {
+		_, _ = client.Put(ctx, resultKey, string(resultBytes))
 	}
 }

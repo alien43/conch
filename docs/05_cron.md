@@ -5,7 +5,7 @@ Distributed cron: a schedule executed by exactly one node per tick. Anyone sched
 ## Synopsis
 
 ```
-conch cron add <name> --schedule '<cron expr>' [--run-ttl 10m] [--quiet] -- <cmd...>
+conch cron add <name> --schedule '<cron expr>' [--run-ttl 10m] [--exclusive] [--quiet] -- <cmd...>
 conch cron ls [--last] [--json]
 conch cron rm <name>
 conch conchd [--status-addr :9191] # the per-node daemon (systemd unit; identical on every node)
@@ -20,6 +20,7 @@ conch conchd [--status-addr :9191] # the per-node daemon (systemd unit; identica
   "schedule": "*/15 * * * *",
   "cmd": ["restic", "backup", "/data"],
   "run_ttl": "10m",
+  "exclusive": true,
   "added_by": "admin@host1",
   "added_at": "2026-06-12T10:15:00Z"
 }
@@ -30,6 +31,8 @@ conch conchd [--status-addr :9191] # the per-node daemon (systemd unit; identica
 * `run_ttl`: expected max runtime; bounds the job's etcd session TTL (the lease behind
   the supervision loop stays the core default; `run_ttl` only caps how long conchd will
   let the child run before declaring it hung and killing it). Default `10m`.
+* `exclusive` (`--exclusive`, default off; omitted from the JSON when off): a run also
+  holds the job's lock, so a tick can't overlap a previous run. See "Exclusive jobs" below.
 * `add` on an existing name overwrites (it's how you edit). `rm` deletes; a run already
   in flight finishes.
 
@@ -72,8 +75,31 @@ overlaps itself: its per-job loop waits for the run to finish and then schedules
 the next tick after *now*, skipping the ones it missed.) Pinned by
 `TestCronTicksMayOverlapAcrossNodes`.
 
-Jobs that must not overlap: keep `run_ttl` below the interval, or have the command
-take a `conch sema <job> --max 1 --nonblock` around its body (a skipped tick exits 75).
+Jobs that must not overlap: add them with `--exclusive` (below).
+
+### Exclusive jobs
+
+An exclusive run holds **two** keys: the tick's fire key, claimed exactly as above, and
+the job's lock `/conch/v1/cron/lock/<name>`, which it holds for the whole run. After
+winning a tick, the node tries the lock **without waiting**:
+
+* **Free:** it takes the lock on its conchd session lease, runs the job, and deletes the
+  lock when the run ends (only if it is still the lock it took).
+* **Held:** a previous run is still live on some node. The tick is not run. Its result is
+  written with `"skipped": true` (`cron ls --last` shows `SKIP`), and the live holder is
+  logged (`skipped tick: previous run still live`). The tick is used up: a skipped tick is
+  not retried, matching the misfire policy above.
+
+Because the lock rides the **session lease**, a node that crashes or is partitioned
+mid-run frees it within the session TTL (not after `run_ttl`), the same lease loss that
+already kills the child. Skipping rather than queueing is deliberate: queued ticks pile
+up behind a slow run, and `flock -n` users expect skip. Pinned by
+`TestCronExclusiveSkipsWhileRunLive` and `TestCronExclusiveLockFreedOnSessionLoss`.
+
+Use it for jobs that **modify a single shared resource** (a repo prune, a garbage
+collection, maintenance on one database, a failover drill). Read-only checks and
+independent dumps don't need it. It also neutralises the `@every` clock skew below for
+the job: even if two nodes claim different ticks, only one can run at a time.
 
 `@every` schedules are computed from each node's own clock (`now + interval`, rounded
 to the second), so nodes can disagree on tick timestamps and both claim "their" tick.

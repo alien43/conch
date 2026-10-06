@@ -56,3 +56,9 @@ func CronResultPrefix(name string) string {
 func CronResultKey(name string, tickUnix int64) string {
 	return fmt.Sprintf("%s/cron/result/%s/%d", PrefixV1, name, tickUnix)
 }
+
+// CronLockKey is the per-job lock an exclusive job holds for the whole run, on
+// the conchd session lease, so a run can't overlap the next tick's on another node.
+func CronLockKey(name string) string {
+	return fmt.Sprintf("%s/cron/lock/%s", PrefixV1, name)
+}

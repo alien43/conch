@@ -57,7 +57,7 @@ func TestCronDistributedScheduling(t *testing.T) {
 
 	// Add an @every 1s job
 	jobName := "every1s"
-	_, err = CmdAdd(ctx, cli, jobName, "@every 1s", "5s", []string{"true"})
+	_, err = CmdAdd(ctx, cli, jobName, "@every 1s", "5s", false, []string{"true"})
 	if err != nil {
 		t.Fatalf("failed to add job: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestCronKilledWinnerClaimedNoRerun(t *testing.T) {
 
 	// Add @every 1s job running a sleep command
 	jobName := "killed-winner"
-	_, err = CmdAdd(ctx, cli, jobName, "@every 1s", "5s", []string{"sleep", "5"})
+	_, err = CmdAdd(ctx, cli, jobName, "@every 1s", "5s", false, []string{"sleep", "5"})
 	if err != nil {
 		t.Fatalf("failed to add job: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestCronRmDuringRunFinish(t *testing.T) {
 
 	// Add an @every 1s job running a sleep 2 command
 	jobName := "rm-during-run"
-	_, err = CmdAdd(ctx, cli, jobName, "@every 1s", "5s", []string{"sleep", "2"})
+	_, err = CmdAdd(ctx, cli, jobName, "@every 1s", "5s", false, []string{"sleep", "2"})
 	if err != nil {
 		t.Fatalf("failed to add job: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestCronStatusServer(t *testing.T) {
 	// Add @every 1s job
 	jobName := "status-test-job"
 	scheduleExpr := "*/5 * * * *"
-	_, err = CmdAdd(ctx, cli, jobName, scheduleExpr, "5s", []string{"true"})
+	_, err = CmdAdd(ctx, cli, jobName, scheduleExpr, "5s", false, []string{"true"})
 	if err != nil {
 		t.Fatalf("failed to add job: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestCronLs(t *testing.T) {
 	defer cli.Close()
 
 	// 1. Add cron job
-	_, err = CmdAdd(ctx, cli, "job1", "*/5 * * * *", "10m", []string{"true"})
+	_, err = CmdAdd(ctx, cli, "job1", "*/5 * * * *", "10m", false, []string{"true"})
 	if err != nil {
 		t.Fatalf("failed to add job: %v", err)
 	}
@@ -542,8 +542,8 @@ func TestCronLs(t *testing.T) {
 // TestCronTicksMayOverlapAcrossNodes (H6) PINS CURRENT BEHAVIOUR: each tick is
 // claimed exactly once, but a node busy with tick T doesn't stop another node
 // claiming T+1, so a run longer than the schedule interval overlaps the next
-// one on a different node (as plain cron would on one host). If tick-skipping
-// is ever added, this test is expected to fail and should be inverted.
+// one on a different node (as plain cron would on one host). This stays the
+// default; opt-in `exclusive` jobs skip instead (exclusive_integration_test.go).
 func TestCronTicksMayOverlapAcrossNodes(t *testing.T) {
 	etcd, err := testutil.StartEtcd(t.TempDir())
 	if err != nil {
@@ -573,7 +573,7 @@ func TestCronTicksMayOverlapAcrossNodes(t *testing.T) {
 	// Each conchd has its own session, so CONCH_LEASE identifies the instance.
 	logFile := t.TempDir() + "/runs.log"
 	script := `s=$(date +%s%N); sleep 5; echo "$CONCH_LEASE $s $(date +%s%N)" >> ` + logFile
-	if _, err := CmdAdd(ctx, cli, "overlap", "@every 2s", "10s", []string{"sh", "-c", script}); err != nil {
+	if _, err := CmdAdd(ctx, cli, "overlap", "@every 2s", "10s", false, []string{"sh", "-c", script}); err != nil {
 		t.Fatalf("failed to add job: %v", err)
 	}
 

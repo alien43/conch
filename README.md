@@ -156,11 +156,11 @@ conch sema heavy-jobs --max 3 --who --json
 
 ## cron
 
-Register and manage distributed cron jobs. Each tick runs exactly once across the cluster.
+Register and manage distributed cron jobs. Each tick runs exactly once across the cluster. With `--exclusive`, a tick is skipped while a previous run of the same job is still live on any node (see `docs/05_cron.md`).
 
 ```bash
 # Register a job
-conch cron add <name> --schedule '<expr>' [--run-ttl 10m] -- <cmd...>
+conch cron add <name> --schedule '<expr>' [--run-ttl 10m] [--exclusive] -- <cmd...>
 
 # Remove a job
 conch cron rm <name>
