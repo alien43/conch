@@ -167,7 +167,6 @@ func (sh *SemaHolder) checkRankAndWatch(ctx context.Context, prefix string) (int
 	return 0, false, nil
 }
 
-
 func (sh *SemaHolder) watchKeyDeletion(ctx context.Context, targetKey string, startRev int64, sessionErrMsg string) error {
 	watchCtx, watchCancel := context.WithCancel(ctx)
 	defer watchCancel()
