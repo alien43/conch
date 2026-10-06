@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alien43/conch/internal/core"
 	"github.com/alien43/conch/internal/testutil"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 )
 
 func TestElectWhoVacant(t *testing.T) {
@@ -460,5 +462,131 @@ func TestElectWatch(t *testing.T) {
 	}
 	if !strings.Contains(output, "office-watch node-watch pid=12345") {
 		t.Errorf("expected leader notification, got: %q", output)
+	}
+}
+
+// h1Setup starts etcd, makes candidate A the leader of office through a raw
+// election, and starts candidate B (RunElect) queued behind it. It returns once
+// B's candidate key is visible, along with B's lease ID.
+func h1Setup(t *testing.T, office string, restart bool, onAcquire string, child []string) (cli *clientv3.Client, leaderA *concurrency.Election, leaseB clientv3.LeaseID, done chan int, cancel context.CancelFunc) {
+	t.Helper()
+	etcd, err := testutil.StartEtcd(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to start etcd: %v", err)
+	}
+	t.Cleanup(etcd.Stop)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	endpoints := []string{etcd.ClientURL}
+
+	cli, err = clientv3.New(clientv3.Config{Endpoints: endpoints, DialTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("failed to connect to etcd: %v", err)
+	}
+	t.Cleanup(func() { cli.Close() })
+
+	sessA, err := concurrency.NewSession(cli, concurrency.WithTTL(10))
+	if err != nil {
+		t.Fatalf("failed to create session A: %v", err)
+	}
+	t.Cleanup(func() { sessA.Close() })
+	leaderA = concurrency.NewElection(sessA, core.ElectElectionKey(office))
+	if err := leaderA.Campaign(context.Background(), "A"); err != nil {
+		t.Fatalf("A failed to campaign: %v", err)
+	}
+
+	var ctx context.Context
+	ctx, cancel = context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done = make(chan int, 1)
+	go func() {
+		code, _ := RunElect(ctx, logger, endpoints, time.Second, 10*time.Second, 2*time.Second, restart, office, 0, 60*time.Second, onAcquire, "", 5*time.Second, child)
+		done <- code
+	}()
+
+	// Wait for B's key to show up behind A's.
+	for i := 0; i < 50; i++ {
+		resp, err := cli.Get(context.Background(), core.ElectPrefix(office), clientv3.WithPrefix())
+		if err == nil {
+			for _, kv := range resp.Kvs {
+				if kv.Lease != int64(sessA.Lease()) {
+					return cli, leaderA, clientv3.LeaseID(kv.Lease), done, cancel
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("candidate B never appeared under %s", core.ElectPrefix(office))
+	return
+}
+
+// TestElectQueuedCandidateLosesLeaseNeverActs (H1): a queued candidate whose
+// lease dies while it waits must not run --on-acquire or the child once the
+// leader resigns. Campaign only waits for lower keys to go; it never checks that
+// its own key survived.
+func TestElectQueuedCandidateLosesLeaseNeverActs(t *testing.T) {
+	dir := t.TempDir()
+	markHook := dir + "/hook"
+	markChild := dir + "/child"
+
+	cli, leaderA, leaseB, done, _ := h1Setup(t, "office-h1", false,
+		"touch "+markHook, []string{"sh", "-c", "touch " + markChild + "; sleep 30"})
+
+	// The key suffix is B's lease in hex; revoke it out-of-band.
+	if _, err := cli.Revoke(context.Background(), leaseB); err != nil {
+		t.Fatalf("failed to revoke B's lease: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := leaderA.Resign(context.Background()); err != nil {
+		t.Fatalf("A failed to resign: %v", err)
+	}
+
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("RunElect did not return within 15s")
+	}
+
+	for _, m := range []string{markHook, markChild} {
+		if _, err := os.Stat(m); err == nil {
+			t.Errorf("%s was created: B acted as leader after its lease was revoked", m)
+		}
+	}
+	if code != 75 {
+		t.Errorf("expected exit code 75 (acquire failed), got %d", code)
+	}
+}
+
+// TestElectQueuedCandidateLosesLeaseRecampaigns (H1): under --restart, the
+// same scenario must end with B winning on a fresh lease, not the revoked one.
+func TestElectQueuedCandidateLosesLeaseRecampaigns(t *testing.T) {
+	leaseFile := t.TempDir() + "/lease"
+
+	cli, leaderA, leaseB, _, cancel := h1Setup(t, "office-h1-restart", true,
+		"", []string{"sh", "-c", "echo $CONCH_LEASE > " + leaseFile + "; sleep 30"})
+	defer cancel()
+
+	if _, err := cli.Revoke(context.Background(), leaseB); err != nil {
+		t.Fatalf("failed to revoke B's lease: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := leaderA.Resign(context.Background()); err != nil {
+		t.Fatalf("A failed to resign: %v", err)
+	}
+
+	var got string
+	for i := 0; i < 100; i++ {
+		if b, err := os.ReadFile(leaseFile); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+			got = strings.TrimSpace(string(b))
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got == "" {
+		t.Fatalf("B never ran its child after re-campaigning")
+	}
+	if got == fmt.Sprintf("%x", int64(leaseB)) {
+		t.Errorf("B's child ran under the revoked lease %s instead of a fresh one", got)
 	}
 }

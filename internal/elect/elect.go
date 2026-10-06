@@ -3,6 +3,7 @@ package elect
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -39,11 +40,46 @@ func (eh *ElectHolder) Acquire(ctx context.Context) (int64, error) {
 		ctx, cancel = context.WithTimeout(ctx, eh.waitLimit)
 		defer cancel()
 	}
+
+	// Campaign only waits for lower keys to be deleted; it never re-checks that
+	// our own key survived. Abort the wait when the session dies, and confirm
+	// the key afterwards, so a candidate whose lease expired while queued can't
+	// "win" an office it no longer holds.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() {
+		select {
+		case <-eh.sess.DoneCh:
+			stop()
+		case <-ctx.Done():
+		}
+	}()
+
 	if err := eh.election.Campaign(ctx, eh.val); err != nil {
+		select {
+		case <-eh.sess.DoneCh:
+			return 0, errSessionLost
+		default:
+		}
 		return 0, err
+	}
+
+	resp, err := eh.sess.Client.Get(ctx, eh.election.Key())
+	if err != nil {
+		return 0, err
+	}
+	if len(resp.Kvs) == 0 || resp.Kvs[0].CreateRevision != eh.election.Rev() {
+		return 0, errSessionLost
+	}
+	select {
+	case <-eh.sess.DoneCh:
+		return 0, errSessionLost
+	default:
 	}
 	return eh.election.Rev(), nil
 }
+
+var errSessionLost = errors.New("session lost while campaigning: our candidate key is gone")
 
 func (eh *ElectHolder) Release(ctx context.Context) error {
 	return eh.election.Resign(ctx)
