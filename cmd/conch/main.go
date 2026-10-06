@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alien43/conch/internal/core"
 	"github.com/alien43/conch/internal/cron"
 	"github.com/alien43/conch/internal/elect"
 	"github.com/alien43/conch/internal/sema"
@@ -140,6 +141,19 @@ func parseCommon(fs *flag.FlagSet, args []string, killAfterStr *string) (endpoin
 			fmt.Fprintf(os.Stderr, "invalid kill-after: %v\n", err)
 			os.Exit(64)
 		}
+		explicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "kill-after" {
+				explicit = true
+			}
+		})
+		fitted, warning := core.FitKillAfter(ttl, killAfter, explicit)
+		if warning != "" {
+			logger.Warn("kill-after does not fit ttl", "detail", warning)
+		} else if fitted != killAfter {
+			logger.Info("kill-after lowered to fit ttl", "kill_after", fitted, "ttl", ttl)
+		}
+		killAfter = fitted
 	}
 	return
 }
@@ -160,7 +174,7 @@ func handleElect(args []string) {
 	fs := flag.NewFlagSet("elect", flag.ExitOnError)
 
 	restart := fs.Bool("restart", false, "re-campaign and re-run forever")
-	killAfterStr := fs.String("kill-after", "5s", "SIGTERM -> SIGKILL escalation delay")
+	killAfterStr := fs.String("kill-after", core.DefaultKillAfter.String(), "SIGTERM -> SIGKILL escalation delay (default lowered to fit --ttl)")
 	waitStr := fs.String("wait", "", "max time to campaign before giving up")
 	nonblock := fs.Bool("nonblock", false, "equivalent to --wait 0")
 	who := fs.Bool("who", false, "print current leader, exit")
@@ -269,7 +283,7 @@ func handleSema(args []string) {
 	spread := fs.Bool("spread", false, "at most one slot per node")
 	who := fs.Bool("who", false, "list current holders and waiters")
 	useJSON := fs.Bool("json", false, "print output as JSON")
-	killAfterStr := fs.String("kill-after", "5s", "SIGTERM -> SIGKILL escalation delay")
+	killAfterStr := fs.String("kill-after", core.DefaultKillAfter.String(), "SIGTERM -> SIGKILL escalation delay (default lowered to fit --ttl)")
 
 	wrapperArgs, childCmd := splitChildCmd(args)
 

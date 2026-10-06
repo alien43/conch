@@ -61,7 +61,7 @@ Exit 0 if any holders, 1 if the semaphore is empty.
 | `--wait` | infinite | max time to wait for a slot (exit 75 on timeout; our waiter key is deleted) |
 | `--nonblock` | off | `--wait 0`, flock -n style |
 | `--spread` | off | at most one slot per node (see above) |
-| `--kill-after` | `5s` | SIGTERM → SIGKILL escalation |
+| `--kill-after` | `5s` | SIGTERM → SIGKILL escalation; the default is lowered to fit the TTL (`02_core.md` §2.1) |
 
 ## Failure behavior
 

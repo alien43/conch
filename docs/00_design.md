@@ -34,7 +34,7 @@ conch elect <office> --watch                               # stream leadership c
 ```
 
 * Campaigns for `<office>`; on winning, execs `<cmd>` with `CONCH_LEADER=1` and `CONCH_REV=<fencing token>` in the environment.
-* On session loss or preemption: SIGTERM child, SIGKILL after `--kill-after` (default 5s).
+* On session loss or preemption: SIGTERM child, SIGKILL after `--kill-after` (default 5s, lowered to fit the TTL — `02_core.md` §2.1).
 * `--restart`: re-campaign and re-run after the child exits or leadership is lost (the "run this daemon on exactly one node" mode). Without it, exit when done.
 * The campaign value is `host:pid:starttime`, so `--who` is actually informative.
 

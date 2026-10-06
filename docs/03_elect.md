@@ -64,7 +64,7 @@ A read-only predicate to safely check if the current host holds leadership of an
 | Flag | Default | Meaning |
 | :--- | :--- | :--- |
 | `--restart` | off | re-campaign and re-run forever (service mode) |
-| `--kill-after` | `5s` | SIGTERM → SIGKILL escalation delay |
+| `--kill-after` | `5s` | SIGTERM → SIGKILL escalation delay; the default is lowered to fit the TTL (`02_core.md` §2.1) |
 | `--wait` | infinite | max time to campaign before giving up (exit 75) |
 | `--nonblock` | off | equivalent to `--wait 0` |
 | `--assert` | off | assert if this host holds the office (exit 0/1/69) |

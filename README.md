@@ -82,7 +82,7 @@ conch elect <office> [flags] -- <cmd...>
 | Flag | Default | Description |
 |---|---|---|
 | `--restart` | off | re-campaign after child exits |
-| `--kill-after` | 5s | grace period before SIGKILL |
+| `--kill-after` | 5s* | grace period before SIGKILL |
 | `--wait` | forever | give up after this duration |
 | `--nonblock` | off | exit 75 immediately if office is held |
 | `--on-acquire` | — | shell command run on winning the office |
@@ -90,6 +90,11 @@ conch elect <office> [flags] -- <cmd...>
 | `--hook-timeout` | 30s | timeout for hook commands |
 | `--json` | off | print output as JSON (for `--who`, `--watch`, `--assert`) |
 | `--min-rev` | 0 | minimum create-revision for `--assert` |
+
+\* Lowered automatically when it doesn't fit the TTL: a child that ignores SIGTERM must be
+SIGKILLed at least 1s before a rival can acquire, i.e. `TTL/3 + margin + kill-after + 1s < TTL`
+(the default becomes 2.5s at TTL 10s; fits as-is at TTL 30s). An explicit value that doesn't fit is
+kept, with a warning. See [`docs/02_core.md`](docs/02_core.md) §2.1.
 
 ```bash
 # Run a daemon, restart on failure
@@ -127,8 +132,13 @@ conch sema <name> --max N [flags] -- <cmd...>
 | `--spread` | off | at most 1 slot per hostname |
 | `--wait` | forever | give up after this duration |
 | `--nonblock` | off | exit 75 immediately if no slot available |
-| `--kill-after` | 5s | grace period before SIGKILL |
+| `--kill-after` | 5s* | grace period before SIGKILL |
 | `--json` | off | print output as JSON (for `--who`) |
+
+\* Lowered automatically when it doesn't fit the TTL: a child that ignores SIGTERM must be
+SIGKILLed at least 1s before a rival can acquire, i.e. `TTL/3 + margin + kill-after + 1s < TTL`
+(the default becomes 2.5s at TTL 10s; fits as-is at TTL 30s). An explicit value that doesn't fit is
+kept, with a warning. See [`docs/02_core.md`](docs/02_core.md) §2.1.
 
 ```bash
 # At most 3 nodes run this at once

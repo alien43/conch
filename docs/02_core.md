@@ -24,6 +24,34 @@ endpoint is reachable within the dial timeout: exit **69** without side effects.
   fires first. We do not wait out the TTL: ambiguity is loss (principle 3).
 * The session's lease ID and TTL are logged at acquisition.
 
+### 2.1 Kill-after must fit inside the TTL
+
+The wrapper declares the lease lost after **detect = TTL/3 + margin** without a
+keepalive response (margin = half the interval, or 1.5s when the interval is ≤ 2s):
+5s at TTL 10s, 15s at TTL 30s. The server expires the lease one TTL after the last
+renewal it received, and both clocks start at that renewal. A child that ignores
+SIGTERM is SIGKILLed at `detect + kill-after`, so for it to be dead before a rival can
+start:
+
+```
+detect + kill-after + 1s < TTL
+```
+
+At startup `elect` and `sema` check this (`core.FitKillAfter`, one source of truth with
+the keepalive monitor via `core.LossDetectTimeout`):
+
+* `--kill-after` **not given** and the 5s default doesn't fit ⇒ the default is lowered to
+  `(TTL − detect) / 2` (2.5s at TTL 10s, 1.25s at TTL 6s), logged at INFO.
+* `--kill-after` **given explicitly** and it doesn't fit ⇒ kept, with a WARN naming the
+  inequality.
+* TTL too small for any delay to fit (below ~6s) ⇒ 5s kept, WARN.
+
+Measured with a partitioned leader whose child traps SIGTERM: at TTL 10s and
+kill-after 5s the child died ~0.1–0.5s before the rival started (zero designed slack);
+with the lowered 2.5s default, ~2.9s before. At TTL 30s the default already fits (~10s).
+`conchd` passes a fixed 5s; its tick claims don't depend on the lease, so no rival
+waits on it.
+
 ## 3. Holder identity
 
 The value stored at any held key is one-line JSON:
@@ -49,8 +77,8 @@ The single code path used by `elect`, `sema`, and `conchd`:
    | `CONCH_LEASE` | lease ID (hex) |
 3. Wait on **either** child exit **or** loss signal:
    * Child exits first ⇒ release hold cleanly, exit with the child's code.
-   * Loss first ⇒ SIGTERM the process group; after `--kill-after` (default `5s`)
-     SIGKILL the group; reap; exit **70**.
+   * Loss first ⇒ SIGTERM the process group; after `--kill-after` (default `5s`, lowered
+     to fit the TTL — §2.1) SIGKILL the group; reap; exit **70**.
 4. SIGINT/SIGTERM to the wrapper: forward SIGTERM to the group, wait (same kill-after
    escalation), release hold, exit with the child's code.
 
