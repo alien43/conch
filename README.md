@@ -169,6 +169,17 @@ conch conchd --status-addr :9191
 
 ---
 
+## What gets killed on loss
+
+On lease loss conch SIGTERMs the child's process group, then SIGKILLs it after
+`--kill-after`. On Linux the child also dies if the wrapper itself is SIGKILLed or
+OOM-killed. Not covered:
+
+- **A paused wrapper** (SIGSTOP, VM freeze) can't react at all. Fence on `CONCH_REV`
+  where it matters.
+
+Details: [`docs/02_core.md`](docs/02_core.md) §4.1.
+
 ## Exit codes
 
 | Code | Meaning |

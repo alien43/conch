@@ -119,9 +119,7 @@ func runHook(ctx context.Context, logger *slog.Logger, cmdStr string, hookName s
 	logger.Info("running-hook", "hook", hookName, "name", name, "cmd", cmdStr, "rev", rev)
 
 	cmd := exec.Command("/bin/sh", "-c", cmdStr)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	cmd.SysProcAttr = childProcAttr()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -229,9 +227,7 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 	}
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	cmd.SysProcAttr = childProcAttr()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

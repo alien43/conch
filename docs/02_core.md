@@ -56,6 +56,20 @@ The single code path used by `elect`, `sema`, and `conchd`:
 
 No restart logic lives in the core; `--restart` loops *around* it (per-tool).
 
+### 4.1 What the kill reaches — and what it doesn't
+
+* **Wrapper killed outright (SIGKILL, OOM killer).** The wrapper can't clean up, so on
+  Linux the child (and each hook) is started with `Pdeathsig: SIGKILL`: the kernel kills
+  it when the wrapper dies. This covers the **direct child only** — its own descendants
+  are not signalled, though they stay in its process group. Never call `cmd.Start`
+  under `runtime.LockOSThread`: `Pdeathsig` fires when the *forking thread* exits, and
+  Go retires locked threads when their goroutine exits, which would kill healthy
+  children at random. No equivalent exists outside Linux.
+* **Wrapper paused** (SIGSTOP, VM freeze, swap storm). A paused process can't notice it
+  lost the lease, and nothing in the wrapper can fix that: the child keeps running while
+  a successor starts. The only remedy is **fencing**: pass `CONCH_REV` to whatever the
+  child writes to, and have it reject writes carrying an older revision.
+
 ## 5. Exit codes (public API)
 
 | Code | Meaning |
