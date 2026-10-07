@@ -19,17 +19,27 @@ endpoint is reachable within the dial timeout: exit **69** without side effects.
 | :--- | :--- | :--- |
 | `--ttl` | `CONCH_TTL` | `10s` |
 
-* One `concurrency.Session` per process; keepalive interval = TTL/3 (client default).
-* **Loss detection:** `<-session.Done()` *or* a missed keepalive response — whichever
-  fires first. We do not wait out the TTL: ambiguity is loss (principle 3).
+* One lease per process, granted and renewed by conch itself every TTL/3
+  (`internal/core/lease.go`), with one `concurrency.Session` built on it (`WithLease`)
+  for elections, semaphores and locks. The session's own keepalive stream runs too;
+  extra renewals only extend the lease.
+* **Validity bound:** conch records the local monotonic **send** time of each renewal.
+  etcd extends the lease from when it *receives* the request, so
+  `ValidUntil = send time of the newest successful renewal + granted TTL` is never later
+  than the real server-side expiry (`CoreSession.ValidUntil`). Counting from when a
+  *response* arrives would be late by up to one round trip, which is what conch did before
+  2026-10-07.
+* **Loss detection:** `<-session.Done()`, *or* etcd reports the lease gone, *or* no renewal
+  sent in the last `detect` has succeeded (`CoreSession.LossAt`), whichever fires first.
+  We do not wait out the TTL: ambiguity is loss (principle 3).
 * The session's lease ID and TTL are logged at acquisition.
 
 ### 2.1 Kill-after must fit inside the TTL
 
-The wrapper declares the lease lost after **detect = TTL/3 + margin** without a
-keepalive response (margin = half the interval, or 1.5s when the interval is ≤ 2s):
-5s at TTL 10s, 15s at TTL 30s. The server expires the lease one TTL after the last
-renewal it received, and both clocks start at that renewal. A child that ignores
+The wrapper declares the lease lost **detect = TTL/3 + margin** after the newest
+successful renewal was *sent* (margin = half the interval, or 1.5s when the interval is
+≤ 2s): 5s at TTL 10s, 15s at TTL 30s. etcd cannot expire the lease earlier than one TTL
+after that same send instant, so both counts start together. A child that ignores
 SIGTERM is SIGKILLed at `detect + kill-after`, so for it to be dead before a rival can
 start:
 
@@ -38,7 +48,7 @@ detect + kill-after + 1s < TTL
 ```
 
 At startup `elect` and `sema` check this (`core.FitKillAfter`, one source of truth with
-the keepalive monitor via `core.LossDetectTimeout`):
+the lease monitor via `core.LossDetectTimeout`):
 
 * `--kill-after` **not given** and the 5s default doesn't fit ⇒ the default is lowered to
   `(TTL − detect) / 2` (2.5s at TTL 10s, 1.25s at TTL 6s), logged at INFO.
@@ -49,6 +59,11 @@ the keepalive monitor via `core.LossDetectTimeout`):
 Measured with a partitioned leader whose child traps SIGTERM: at TTL 10s and
 kill-after 5s the child died ~0.1–0.5s before the rival started (zero designed slack);
 with the lowered 2.5s default, ~2.9s before. At TTL 30s the default already fits (~10s).
+
+The 1s slack also covers clock-rate differences: 1% of any TTL up to 100s
+(`TestKillDeadlineSurvivesClockSkew`). Measured against a real etcd at TTL 3s over six
+rounds, `ValidUntil` preceded the server-side expiry by 296–493 ms, and loss was declared
+~0.8–1.0s before it (`TestValidityBoundNeverExceedsServerExpiry`).
 `conchd` passes a fixed 5s; its tick claims don't depend on the lease, so no rival
 waits on it.
 
