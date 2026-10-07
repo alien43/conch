@@ -61,7 +61,7 @@ func printUsageAndExit() {
 	fmt.Fprintf(os.Stderr, `Usage: conch <subcommand> [options]
 
 Subcommands:
-  elect <office> [--restart] [--kill-after 5s] [--wait <dur>] [--nonblock] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] -- <cmd...>
+  elect <office> [--restart] [--kill-after 5s] [--wait <dur>] [--nonblock] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] [--watchdog [--watchdog-heartbeat PATH --watchdog-stale D]] -- <cmd...>
   elect <office> --who [--json]
   elect <office> --watch [--json]
   elect <office> --assert [--min-rev N] [--json]
@@ -191,6 +191,9 @@ func handleElect(args []string) {
 	hookTimeoutStr := fs.String("hook-timeout", "30s", "timeout for on-acquire and on-lose hooks")
 	fenceCmd := fs.String("fence", "", "command that stops what the child started; must confirm (exit 0) within --fence-budget, before the lease can expire")
 	fenceBudgetStr := fs.String("fence-budget", "", "hard deadline for --fence (required with --fence)")
+	watchdog := fs.Bool("watchdog", false, "pet systemd's watchdog (WatchdogSec=) only while fit")
+	heartbeat := fs.String("watchdog-heartbeat", "", "with --watchdog: file the child touches; stale while holding = unfit")
+	staleStr := fs.String("watchdog-stale", "", "with --watchdog-heartbeat: how old the heartbeat may get")
 
 	wrapperArgs, childCmd := splitChildCmd(args)
 
@@ -253,6 +256,29 @@ func handleElect(args []string) {
 			os.Exit(64)
 		}
 		fence = elect.Fence{Cmd: *fenceCmd, Budget: budget}
+	}
+
+	if *watchdog {
+		var stale time.Duration
+		if *heartbeat != "" {
+			if *staleStr == "" {
+				fmt.Fprintf(os.Stderr, "--watchdog-heartbeat needs --watchdog-stale\n")
+				os.Exit(64)
+			}
+			var err error
+			if stale, err = time.ParseDuration(*staleStr); err != nil || stale <= 0 {
+				fmt.Fprintf(os.Stderr, "invalid watchdog-stale: %q\n", *staleStr)
+				os.Exit(64)
+			}
+		}
+		wd, why := core.NewWatchdogFromEnv(*heartbeat, stale, logger)
+		if wd == nil {
+			logger.Warn("watchdog-disabled", "reason", why)
+		}
+		fence.Watchdog = wd
+	} else if *heartbeat != "" || *staleStr != "" {
+		fmt.Fprintf(os.Stderr, "--watchdog-heartbeat/--watchdog-stale need --watchdog\n")
+		os.Exit(64)
 	}
 
 	exitCode, _ := elect.RunElectFenced(ctx, logger, endpoints, dialTimeout, ttl, killAfter, *restart, office, waitLimit, 60*time.Second, *onAcquire, *onLose, hookTimeout, fence, childCmd)

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -335,5 +337,90 @@ func TestFitFence(t *testing.T) {
 		if got := core.FitFence(c.ttl, c.budget) == ""; got != c.ok {
 			t.Errorf("FitFence(%v, %v) ok=%v, want %v", c.ttl, c.budget, got, c.ok)
 		}
+	}
+}
+
+// petLog is a fake NOTIFY_SOCKET recording when each WATCHDOG=1 arrived.
+type petLog struct {
+	mu   sync.Mutex
+	pets []time.Time
+}
+
+func listenNotify(t *testing.T) (string, *petLog) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "notify.sock")
+	c, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	l := &petLog{}
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, _, err := c.ReadFromUnix(buf)
+			if err != nil {
+				return
+			}
+			if string(buf[:n]) == "WATCHDOG=1" {
+				l.mu.Lock()
+				l.pets = append(l.pets, time.Now())
+				l.mu.Unlock()
+			}
+		}
+	}()
+	return path, l
+}
+
+func (l *petLog) between(a, b time.Time) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, p := range l.pets {
+		if p.After(a) && p.Before(b) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestWatchdogAcrossAFailedFence: conch pets while it holds the office, stops
+// petting from a failed fence until a retry confirms, then pets again.
+func TestWatchdogAcrossAFailedFence(t *testing.T) {
+	etcd, _ := fenceEtcd(t)
+	dir := t.TempDir()
+	count := filepath.Join(dir, "count")
+	script, log := fakeFence(t, dir, fmt.Sprintf(`n=$(cat %q 2>/dev/null || echo 0); n=$((n+1)); echo $n > %q; [ $n -le 2 ] && rc=1`, count, count))
+	sock, pets := listenNotify(t)
+	wd := core.NewWatchdog(sock, 50*time.Millisecond, "", 0, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	start := time.Now()
+	go func() {
+		_, _ = RunElectFenced(ctx, quietLogger(), []string{etcd.ClientURL}, time.Second, 6*time.Second, 2*time.Second, true, "wd", 0, 60*time.Second,
+			"", "", time.Second, Fence{Cmd: script, Budget: time.Second, Watchdog: wd}, []string{"sleep", "1"})
+	}()
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline) && len(readFenceLog(t, log)) < 3; time.Sleep(50 * time.Millisecond) {
+	}
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runs := readFenceLog(t, log)
+	if len(runs) < 3 {
+		t.Fatalf("fence ran %d times, want 3", len(runs))
+	}
+	holding := pets.between(start, runs[0].start)
+	starved := pets.between(runs[0].end.Add(100*time.Millisecond), runs[2].start)
+	after := pets.between(runs[2].end.Add(100*time.Millisecond), runs[2].end.Add(500*time.Millisecond))
+	t.Logf("pets: %d while holding, %d between the failed fence and the confirming retry (%s), %d in the 400ms after it",
+		holding, starved, runs[2].start.Sub(runs[0].end).Round(time.Millisecond), after)
+	if holding < 5 {
+		t.Fatalf("only %d pets while holding", holding)
+	}
+	if starved != 0 {
+		t.Fatalf("%d pets while a fence was failed", starved)
+	}
+	if after < 3 {
+		t.Fatalf("only %d pets after the confirming retry", after)
 	}
 }

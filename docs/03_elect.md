@@ -5,7 +5,7 @@ Run a command only while holding a named office; observe elections.
 ## Synopsis
 
 ```
-conch elect <office> [--ttl 10s] [--restart] [--kill-after 5s] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] -- <cmd...>
+conch elect <office> [--ttl 10s] [--restart] [--kill-after 5s] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] [--watchdog [--watchdog-heartbeat PATH --watchdog-stale D]] -- <cmd...>
 conch elect <office> --who [--json]
 conch elect <office> --watch [--json]
 conch elect <office> --assert [--min-rev N] [--json]
@@ -89,6 +89,30 @@ Measured (`internal/elect/fence_test.go`, TTL 6s, budget 1s, real etcd): on a pa
 fence started 2.9–3.0s before the office key vanished server-side, with or without a
 SIGSTOPped child.
 
+### Watchdog (`--watchdog [--watchdog-heartbeat PATH --watchdog-stale D]`)
+
+Under systemd with `WatchdogSec=`, conch pets the watchdog (`sd_notify WATCHDOG=1`, every
+`WATCHDOG_USEC/2`) **only while it is fit**. systemd then acts on a conch that can no longer
+guarantee its fence: it kills and restarts conch, or reboots the host if the unit sets
+`FailureAction=reboot-force`.
+
+| State | Fit when |
+| :--- | :--- |
+| not holding, nothing left unfenced | always |
+| holding | the lease bound still leaves `fence-budget + 1s` (the fence's start deadline has not passed), **and**, with `--watchdog-heartbeat`, the child touched the file within `--watchdog-stale` (a grace of one stale period from the term's start) |
+| fencing | the fence is still within its budget |
+| a fence failed | never, until a retry confirms |
+
+conch sends `READY=1` once at start, so `Type=notify` works.
+
+* **Child health goes through the heartbeat file, not `NotifyAccess=all`.** systemd keeps one
+  watchdog timer per unit, and *any* accepted `WATCHDOG=1` resets it. If both conch and the
+  child petted, a live conch would hide a wedged child and the other way round. Keep the
+  default `NotifyAccess=main`, and have the child touch the heartbeat file from its main loop.
+* Without `WATCHDOG_USEC`/`NOTIFY_SOCKET` (no `WatchdogSec=`), or when `WATCHDOG_PID` names
+  another process, `--watchdog` logs `watchdog-disabled` and conch runs without it.
+* conch never opens `/dev/watchdog*`.
+
 ### `--who`
 
 Prints the current leader's holder JSON (or, without `--json`, a single line
@@ -123,6 +147,9 @@ A read-only predicate to safely check if the current host holds leadership of an
 | `--hook-timeout` | `30s` | timeout duration for transition hooks |
 | `--fence` | empty | command that stops the work the child started; must exit 0 within `--fence-budget` (§ Fencing) |
 | `--fence-budget` | — | hard deadline for `--fence`; required with it; must fit the TTL |
+| `--watchdog` | off | pet systemd's watchdog only while fit (§ Watchdog) |
+| `--watchdog-heartbeat` | — | file the child touches; stale while holding = unfit |
+| `--watchdog-stale` | — | max heartbeat age; required with `--watchdog-heartbeat` |
 
 Plus core flags (`--endpoints`, `--ttl`, `--quiet`, `--json`).
 

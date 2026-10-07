@@ -98,9 +98,11 @@ func RunElect(ctx context.Context, logger *slog.Logger, endpoints []string, dial
 }
 
 // Fence is `--fence CMD --fence-budget D`; a zero value means no fence.
+// Watchdog, if set, pets systemd only while conch is fit (`--watchdog`).
 type Fence struct {
-	Cmd    string
-	Budget time.Duration
+	Cmd      string
+	Budget   time.Duration
+	Watchdog *core.Watchdog
 }
 
 // RunElectFenced is RunElect with a fence (core.RunConfig.Fence). A term whose
@@ -110,6 +112,12 @@ type Fence struct {
 // stopped (signal, cancellation) is not retried: conch exits 71.
 func RunElectFenced(ctx context.Context, logger *slog.Logger, endpoints []string, dialTimeout time.Duration, ttl time.Duration, killAfter time.Duration, restart bool, office string, waitLimit time.Duration, stableThreshold time.Duration, onAcquire string, onLose string, hookTimeout time.Duration, fence Fence, cmdArgs []string) (int, error) {
 	backoff := core.NewBackoff(1*time.Second, 30*time.Second)
+
+	if fence.Watchdog != nil {
+		wctx, wstop := context.WithCancel(ctx)
+		defer wstop()
+		go fence.Watchdog.Run(wctx)
+	}
 
 	for {
 		// 1. Establish session
@@ -150,6 +158,7 @@ func RunElectFenced(ctx context.Context, logger *slog.Logger, endpoints []string
 			HookTimeout: hookTimeout,
 			Fence:       fence.Cmd,
 			FenceBudget: fence.Budget,
+			Watchdog:    fence.Watchdog,
 			OnFenceFailed: func(spec core.FenceSpec, reason string) {
 				failed, failReason = &spec, reason
 			},
@@ -179,7 +188,10 @@ func RunElectFenced(ctx context.Context, logger *slog.Logger, endpoints []string
 					return exitCode, nil
 				case <-time.After(sleepDur):
 				}
-				if core.RunFence(logger, *failed, core.FenceReasonRetry) == nil {
+				fence.Watchdog.Fencing(failed.Budget)
+				err := core.RunFence(logger, *failed, core.FenceReasonRetry)
+				fence.Watchdog.Fenced(err == nil)
+				if err == nil {
 					break
 				}
 			}

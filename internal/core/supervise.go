@@ -118,6 +118,9 @@ type RunConfig struct {
 	// OnFenceFailed is told about a fence that did not confirm, with the
 	// reason it ran, so a caller can retry it before campaigning again.
 	OnFenceFailed func(spec FenceSpec, reason string)
+	// Watchdog, if set, is told about the term so it pets systemd only while
+	// conch is fit (see watchdog.go).
+	Watchdog *Watchdog
 }
 
 func runHook(ctx context.Context, logger *slog.Logger, cmdStr string, hookName string, name string, rev int64, leaseID int64, timeout time.Duration) error {
@@ -199,6 +202,8 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 		guard = guardFence(gctx, sess, cfg.FenceBudget)
 	}
 	fenceFailed := false
+	cfg.Watchdog.Holding(sess, cfg.FenceBudget)
+	defer cfg.Watchdog.Released()
 
 	// Ensure we release the hold on exit
 	defer func() {
@@ -230,7 +235,10 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 		if !fenceOn || !actedAsHolder {
 			return
 		}
-		if err := RunFence(logger, spec, reason); err != nil {
+		cfg.Watchdog.Fencing(spec.Budget)
+		err := RunFence(logger, spec, reason)
+		cfg.Watchdog.Fenced(err == nil)
+		if err != nil {
 			fenceFailed = true
 			if cfg.OnFenceFailed != nil {
 				cfg.OnFenceFailed(spec, reason)
