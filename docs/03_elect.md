@@ -5,7 +5,7 @@ Run a command only while holding a named office; observe elections.
 ## Synopsis
 
 ```
-conch elect <office> [--ttl 10s] [--restart] [--kill-after 5s] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] -- <cmd...>
+conch elect <office> [--ttl 10s] [--restart] [--kill-after 5s] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] -- <cmd...>
 conch elect <office> --who [--json]
 conch elect <office> --watch [--json]
 conch elect <office> --assert [--min-rev N] [--json]
@@ -40,6 +40,55 @@ Transition hooks allow executing setup/teardown commands synchronously on leader
 * **`--on-lose CMD`**: Runs after the child has been fully killed/terminated (e.g., after `SIGTERM` -> `SIGKILL` escalation completes). Runs before the wrapper re-campaigns (under `--restart`) or exits. It runs whenever `--on-acquire` *started* or the child started — including when `--on-acquire` failed, was killed by lease loss, or the lease was lost before the child could start — so a promote is always paired with a demote. This is a best-effort cleanup; failures are logged but do not halt progress.
 * **Timeout & Isolation**: Both hooks run in the office holder's process group with group-level isolation and are bounded by `--hook-timeout` (default `30s`). If a hook times out, its process group is killed and the execution is treated as a failure.
 
+### Fencing (`--fence CMD --fence-budget D`)
+
+Killing the child's process group is enough when the child *is* the work. It is not
+enough when the child started something outside its process group: a container, a VM,
+a process under another supervisor. `--fence` is the command that stops that work, with
+a hard deadline that conch guarantees fits inside the lease.
+
+* **When it runs:** on every end of a term in which `--on-acquire` or the child started:
+  lease lost, the guardian deadline, child exit, a signal, cancellation. It also runs when
+  the lease is lost before the child could start.
+* **Who starts it:** conch's guardian, on conch's own clock. It does not wait for the child,
+  so a wedged child (SIGSTOP, a hung syscall) cannot delay it. On lease loss it runs
+  **alongside** the child's SIGTERM → kill-after → SIGKILL, not after it.
+* **Deadline:** the fence runs in its own process group. At `--fence-budget` the group is
+  SIGKILLed and the fence has **failed**. Only exit 0 within the budget confirms.
+* **Before resign:** on a graceful end (child exit, signal) the fence confirms *before* the
+  office is resigned, so no rival can win while the work may still run.
+* **Timing:** the fence starts at loss detection, `detect` after the newest successful
+  renewal was *sent* (`02_core.md` §2). The guardian also starts it at the latest when
+  `ValidUntil` leaves `budget + 1s`. etcd cannot expire the lease before `ttl` after that
+  send. At startup conch refuses (exit **64**) unless
+
+  ```
+  detect + fence-budget + 1s < ttl
+  ```
+
+  (`core.FitFence`; 3s fits at the default TTL 10s, 13s at TTL 30s).
+* **Environment:** `CONCH_NAME`, `CONCH_REV`, `CONCH_LEASE`, and `CONCH_FENCE_REASON`, one of
+  `lost`, `lease-deadline`, `child-exit`, `signal`, `cancelled`, `retry`.
+* **A failed fence** (non-zero exit, or killed at the budget):
+  - conch does **not** resign and does **not** revoke the lease. The office stays held until
+    the lease expires on its own, one TTL after the last renewal.
+  - Without `--restart`, conch exits **71**.
+  - With `--restart`, conch retries the fence with backoff (1s → 30s,
+    `CONCH_FENCE_REASON=retry`) and campaigns again only after a retry confirms.
+  - A fence that failed while conch was being stopped (signal or cancellation) is not
+    retried: exit 71.
+
+| | `--on-lose` | `--fence` |
+| :--- | :--- | :--- |
+| purpose | cleanup / demote | stop the work before a rival can start it |
+| when | after the child is fully dead | at loss detection, alongside the kill; before resign |
+| bound | `--hook-timeout` | `--fence-budget`, validated against the TTL |
+| failure | logged, ignored | exit 71, no resign, no re-campaign until a retry confirms |
+
+Measured (`internal/elect/fence_test.go`, TTL 6s, budget 1s, real etcd): on a partition the
+fence started 2.9–3.0s before the office key vanished server-side, with or without a
+SIGSTOPped child.
+
 ### `--who`
 
 Prints the current leader's holder JSON (or, without `--json`, a single line
@@ -72,6 +121,8 @@ A read-only predicate to safely check if the current host holds leadership of an
 | `--on-acquire` | empty | command to run after winning, before child starts |
 | `--on-lose` | empty | command to run after child is killed, before re-campaigning/exit |
 | `--hook-timeout` | `30s` | timeout duration for transition hooks |
+| `--fence` | empty | command that stops the work the child started; must exit 0 within `--fence-budget` (§ Fencing) |
+| `--fence-budget` | — | hard deadline for `--fence`; required with it; must fit the TTL |
 
 Plus core flags (`--endpoints`, `--ttl`, `--quiet`, `--json`).
 

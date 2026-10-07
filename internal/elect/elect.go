@@ -94,6 +94,21 @@ func (eh *ElectHolder) Key() string {
 }
 
 func RunElect(ctx context.Context, logger *slog.Logger, endpoints []string, dialTimeout time.Duration, ttl time.Duration, killAfter time.Duration, restart bool, office string, waitLimit time.Duration, stableThreshold time.Duration, onAcquire string, onLose string, hookTimeout time.Duration, cmdArgs []string) (int, error) {
+	return RunElectFenced(ctx, logger, endpoints, dialTimeout, ttl, killAfter, restart, office, waitLimit, stableThreshold, onAcquire, onLose, hookTimeout, Fence{}, cmdArgs)
+}
+
+// Fence is `--fence CMD --fence-budget D`; a zero value means no fence.
+type Fence struct {
+	Cmd    string
+	Budget time.Duration
+}
+
+// RunElectFenced is RunElect with a fence (core.RunConfig.Fence). A term whose
+// fence failed is not resigned and its lease is not revoked; under --restart
+// the fence is retried with backoff, and the office is only campaigned for
+// again once a retry confirms. A fence that failed while conch was being
+// stopped (signal, cancellation) is not retried: conch exits 71.
+func RunElectFenced(ctx context.Context, logger *slog.Logger, endpoints []string, dialTimeout time.Duration, ttl time.Duration, killAfter time.Duration, restart bool, office string, waitLimit time.Duration, stableThreshold time.Duration, onAcquire string, onLose string, hookTimeout time.Duration, fence Fence, cmdArgs []string) (int, error) {
 	backoff := core.NewBackoff(1*time.Second, 30*time.Second)
 
 	for {
@@ -127,16 +142,47 @@ func RunElect(ctx context.Context, logger *slog.Logger, endpoints []string, dial
 		startTime := time.Now()
 
 		// 3. Run core loop
+		var failed *core.FenceSpec
+		var failReason string
 		exitCode, outcome, err := core.RunWithConfig(ctx, logger, sess, holder, cmdArgs, killAfter, core.RunConfig{
 			OnAcquire:   onAcquire,
 			OnLose:      onLose,
 			HookTimeout: hookTimeout,
+			Fence:       fence.Cmd,
+			FenceBudget: fence.Budget,
+			OnFenceFailed: func(spec core.FenceSpec, reason string) {
+				failed, failReason = &spec, reason
+			},
 		})
 
-		sess.Close()
+		if outcome == core.OutcomeFenceFailed {
+			sess.Abandon()
+		} else {
+			sess.Close()
+		}
 
 		if !restart {
 			return exitCode, err
+		}
+
+		if outcome == core.OutcomeFenceFailed {
+			if failed == nil || failReason == core.FenceReasonSignal || failReason == core.FenceReasonCancelled {
+				return exitCode, err
+			}
+			// Still possibly running: no campaign until a fence confirms.
+			fenceBackoff := core.NewBackoff(1*time.Second, 30*time.Second)
+			for {
+				sleepDur := fenceBackoff.Duration()
+				logger.Warn("fence-retry-backoff", "name", office, "duration", sleepDur)
+				select {
+				case <-ctx.Done():
+					return exitCode, nil
+				case <-time.After(sleepDur):
+				}
+				if core.RunFence(logger, *failed, core.FenceReasonRetry) == nil {
+					break
+				}
+			}
 		}
 
 		// In restart mode, check if we should exit (signal received or context cancelled)

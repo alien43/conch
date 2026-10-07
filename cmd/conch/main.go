@@ -61,7 +61,7 @@ func printUsageAndExit() {
 	fmt.Fprintf(os.Stderr, `Usage: conch <subcommand> [options]
 
 Subcommands:
-  elect <office> [--restart] [--kill-after 5s] [--wait <dur>] [--nonblock] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] -- <cmd...>
+  elect <office> [--restart] [--kill-after 5s] [--wait <dur>] [--nonblock] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] -- <cmd...>
   elect <office> --who [--json]
   elect <office> --watch [--json]
   elect <office> --assert [--min-rev N] [--json]
@@ -189,6 +189,8 @@ func handleElect(args []string) {
 	onAcquire := fs.String("on-acquire", "", "command to run after winning, before child starts")
 	onLose := fs.String("on-lose", "", "command to run after child is killed, before re-campaigning")
 	hookTimeoutStr := fs.String("hook-timeout", "30s", "timeout for on-acquire and on-lose hooks")
+	fenceCmd := fs.String("fence", "", "command that stops what the child started; must confirm (exit 0) within --fence-budget, before the lease can expire")
+	fenceBudgetStr := fs.String("fence-budget", "", "hard deadline for --fence (required with --fence)")
 
 	wrapperArgs, childCmd := splitChildCmd(args)
 
@@ -235,7 +237,25 @@ func handleElect(args []string) {
 		os.Exit(64)
 	}
 
-	exitCode, _ := elect.RunElect(ctx, logger, endpoints, dialTimeout, ttl, killAfter, *restart, office, waitLimit, 60*time.Second, *onAcquire, *onLose, hookTimeout, childCmd)
+	var fence elect.Fence
+	if *fenceCmd != "" || *fenceBudgetStr != "" {
+		if *fenceCmd == "" || *fenceBudgetStr == "" {
+			fmt.Fprintf(os.Stderr, "--fence and --fence-budget go together\n")
+			os.Exit(64)
+		}
+		budget, err := time.ParseDuration(*fenceBudgetStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid fence-budget: %v\n", err)
+			os.Exit(64)
+		}
+		if why := core.FitFence(ttl, budget); why != "" {
+			fmt.Fprintf(os.Stderr, "%s\n", why)
+			os.Exit(64)
+		}
+		fence = elect.Fence{Cmd: *fenceCmd, Budget: budget}
+	}
+
+	exitCode, _ := elect.RunElectFenced(ctx, logger, endpoints, dialTimeout, ttl, killAfter, *restart, office, waitLimit, 60*time.Second, *onAcquire, *onLose, hookTimeout, fence, childCmd)
 	os.Exit(exitCode)
 }
 

@@ -91,6 +91,18 @@ func (cs *CoreSession) LossAt() time.Time {
 	return cs.keeper.LastSent().Add(LossDetectTimeout(cs.ttl))
 }
 
+// Abandon drops the session without revoking its lease, so the lease expires
+// on its own one TTL after the last renewal. Used when a fence failed: revoking
+// would let a rival acquire at once while the fenced workload may still run.
+func (cs *CoreSession) Abandon() {
+	if cs.stop != nil {
+		cs.stop()
+	}
+	if cs.Client != nil {
+		_ = cs.Client.Close()
+	}
+}
+
 func (cs *CoreSession) Close() {
 	if cs.stop != nil {
 		cs.stop()

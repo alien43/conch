@@ -127,6 +127,7 @@ No restart logic lives in the core; `--restart` loops *around* it (per-tool).
 | **69** | etcd unreachable / no session could be established |
 | **70** | hold lost while child was running (child was killed) |
 | **75** | could not acquire: `--nonblock` set, or `--wait` exhausted |
+| **71** | `elect --fence`: the fence did not confirm within its budget; what it fences may still run (`03_elect.md` § Fencing) |
 
 Codes chosen from `sysexits.h`; 75 = `EX_TEMPFAIL` matches `flock -n` conventions in
 spirit (retryable), 70 = `EX_SOFTWARE` (the run is tainted).

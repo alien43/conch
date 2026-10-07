@@ -78,6 +78,7 @@ const (
 	OutcomeSignalReceived   Outcome = "signal-received"
 	OutcomeContextCancelled Outcome = "context-cancelled"
 	OutcomeAcquireFailed    Outcome = "acquire-failed"
+	OutcomeFenceFailed      Outcome = "fence-failed"
 )
 
 func terminateGroup(logger *slog.Logger, name string, rev int64, pgid int, killAfter time.Duration, childDone chan error) error {
@@ -106,6 +107,17 @@ type RunConfig struct {
 	OnAcquire   string
 	OnLose      string
 	HookTimeout time.Duration
+
+	// Fence, if set, runs whenever a term ends after on-acquire or the child
+	// started, with FenceBudget as its hard deadline (see fence.go). It is
+	// started by conch's own guardian at the latest when the lease's validity
+	// bound leaves FenceBudget + 1s, and runs alongside the child's
+	// termination, before the office is resigned.
+	Fence       string
+	FenceBudget time.Duration
+	// OnFenceFailed is told about a fence that did not confirm, with the
+	// reason it ran, so a caller can retry it before campaigning again.
+	OnFenceFailed func(spec FenceSpec, reason string)
 }
 
 func runHook(ctx context.Context, logger *slog.Logger, cmdStr string, hookName string, name string, rev int64, leaseID int64, timeout time.Duration) error {
@@ -178,8 +190,24 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 
 	logger.Info("acquired", "name", hold.Name(), "key", hold.Key(), "rev", rev)
 
+	fenceOn := cfg.Fence != ""
+	spec := FenceSpec{Cmd: cfg.Fence, Budget: cfg.FenceBudget, Name: hold.Name(), Rev: rev, Lease: int64(sess.LeaseID)}
+	var guard <-chan struct{} // nil, so never ready, without a fence
+	if fenceOn {
+		gctx, gstop := context.WithCancel(context.Background())
+		defer gstop()
+		guard = guardFence(gctx, sess, cfg.FenceBudget)
+	}
+	fenceFailed := false
+
 	// Ensure we release the hold on exit
 	defer func() {
+		if fenceFailed {
+			// Resigning would let a rival start while what we fence may still
+			// run. Leave the office to the lease, which expires on its own.
+			logger.Error("not-resigning", "name", hold.Name(), "rev", rev, "reason", "fence failed")
+			return
+		}
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := hold.Release(releaseCtx); err != nil {
@@ -197,12 +225,42 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 		}
 	}()
 
+	// fence runs the fence once if this term acted as the holder.
+	fence := func(reason string) {
+		if !fenceOn || !actedAsHolder {
+			return
+		}
+		if err := RunFence(logger, spec, reason); err != nil {
+			fenceFailed = true
+			if cfg.OnFenceFailed != nil {
+				cfg.OnFenceFailed(spec, reason)
+			}
+		}
+	}
+	// endTerm stops the child and fences concurrently: the fence's deadline is
+	// the lease's, not the child's, so it must not wait for kill-after.
+	endTerm := func(reason string, pgid int, childDone chan error) error {
+		fenced := make(chan struct{})
+		go func() { fence(reason); close(fenced) }()
+		err := terminateGroup(logger, hold.Name(), rev, pgid, killAfter, childDone)
+		<-fenced
+		return err
+	}
+	fenceResult := func(code int, outcome Outcome) (int, Outcome, error) {
+		if fenceFailed {
+			return ExitFenceFailed, OutcomeFenceFailed, nil
+		}
+		return code, outcome, nil
+	}
+
 	// Run on-acquire hook, supervised by the lease like the child is.
 	if cfg.OnAcquire != "" {
 		hookCtx, stop := context.WithCancel(ctx)
 		go func() {
 			select {
 			case <-sess.DoneCh:
+				stop()
+			case <-guard:
 				stop()
 			case <-hookCtx.Done():
 			}
@@ -214,8 +272,17 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 			select {
 			case <-sess.DoneCh:
 				logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev)
-				return 70, OutcomeHoldLost, nil
+				fence(FenceReasonLost)
+				return fenceResult(70, OutcomeHoldLost)
+			case <-guard:
+				logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev, "reason", "lease deadline")
+				fence(FenceReasonLeaseDeadline)
+				return fenceResult(70, OutcomeHoldLost)
 			default:
+			}
+			fence(FenceReasonChildExit)
+			if fenceFailed {
+				return fenceResult(75, OutcomeAcquireFailed)
 			}
 			return 75, OutcomeAcquireFailed, err
 		}
@@ -223,7 +290,8 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 
 	// If no command is provided, we just exit with 0 immediately after acquiring and releasing
 	if len(cmdArgs) == 0 {
-		return 0, OutcomeExitNormal, nil
+		fence(FenceReasonChildExit)
+		return fenceResult(0, OutcomeExitNormal)
 	}
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
@@ -244,10 +312,16 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 	select {
 	case <-sess.DoneCh:
 		logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev)
-		return 70, OutcomeHoldLost, nil
+		fence(FenceReasonLost)
+		return fenceResult(70, OutcomeHoldLost)
+	case <-guard:
+		logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev, "reason", "lease deadline")
+		fence(FenceReasonLeaseDeadline)
+		return fenceResult(70, OutcomeHoldLost)
 	case <-ctx.Done():
 		logger.Warn("context-cancelled", "name", hold.Name(), "err", ctx.Err(), "rev", rev)
-		return 70, OutcomeContextCancelled, nil
+		fence(FenceReasonCancelled)
+		return fenceResult(70, OutcomeContextCancelled)
 	default:
 	}
 
@@ -273,23 +347,29 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 	case err := <-childDone:
 		exitCode := getExitCode(err)
 		logger.Info("child-exit", "name", hold.Name(), "exit", exitCode, "rev", rev)
-		return exitCode, OutcomeExitNormal, nil
+		fence(FenceReasonChildExit)
+		return fenceResult(exitCode, OutcomeExitNormal)
 
 	case <-ctx.Done():
 		logger.Warn("context-cancelled", "name", hold.Name(), "err", ctx.Err(), "rev", rev)
-		_ = terminateGroup(logger, hold.Name(), rev, pgid, killAfter, childDone)
-		return 70, OutcomeContextCancelled, nil
+		_ = endTerm(FenceReasonCancelled, pgid, childDone)
+		return fenceResult(70, OutcomeContextCancelled)
 
 	case <-sess.DoneCh:
 		logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev)
-		_ = terminateGroup(logger, hold.Name(), rev, pgid, killAfter, childDone)
-		return 70, OutcomeHoldLost, nil
+		_ = endTerm(FenceReasonLost, pgid, childDone)
+		return fenceResult(70, OutcomeHoldLost)
+
+	case <-guard:
+		logger.Warn("lost", "name", hold.Name(), "key", hold.Key(), "rev", rev, "reason", "lease deadline")
+		_ = endTerm(FenceReasonLeaseDeadline, pgid, childDone)
+		return fenceResult(70, OutcomeHoldLost)
 
 	case sig := <-sigChan:
 		logger.Info("wrapper-signal", "name", hold.Name(), "signal", sig.String(), "rev", rev)
-		err := terminateGroup(logger, hold.Name(), rev, pgid, killAfter, childDone)
+		err := endTerm(FenceReasonSignal, pgid, childDone)
 		exitCode := getExitCode(err)
 		logger.Info("child-exit", "name", hold.Name(), "exit", exitCode, "rev", rev)
-		return exitCode, OutcomeSignalReceived, nil
+		return fenceResult(exitCode, OutcomeSignalReceived)
 	}
 }
