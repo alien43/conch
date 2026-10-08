@@ -15,8 +15,6 @@ import (
 	"github.com/alien43/conch/internal/cron"
 	"github.com/alien43/conch/internal/elect"
 	"github.com/alien43/conch/internal/sema"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=<tag>"
@@ -79,6 +77,8 @@ Global Env Options (can be passed as flags too):
   CONCH_ENDPOINTS (default: localhost:2379)
   CONCH_DIAL_TIMEOUT (default: 5s)
   CONCH_TTL (default: 10s)
+  CONCH_CACERT, CONCH_CERT, CONCH_KEY   etcd TLS (--cacert, --cert, --key); use https:// endpoints
+  CONCH_USER, CONCH_PASSWORD            etcd auth (--user; password via env or --password-file)
 `)
 	os.Exit(64)
 }
@@ -88,7 +88,35 @@ func registerGlobalFlags(fs *flag.FlagSet) (endpointsStr *string, dialTimeoutStr
 	dialTimeoutStr = fs.String("dial-timeout", getEnvOrDefault("CONCH_DIAL_TIMEOUT", "5s"), "dial timeout duration")
 	ttlStr = fs.String("ttl", getEnvOrDefault("CONCH_TTL", "10s"), "session TTL duration")
 	quietFlag = fs.Bool("quiet", false, "suppress logs below WARN")
+	secFlags.caCert = fs.String("cacert", os.Getenv("CONCH_CACERT"), "etcd TLS: CA certificate (PEM) to verify etcd's server certificate")
+	secFlags.cert = fs.String("cert", os.Getenv("CONCH_CERT"), "etcd TLS: client certificate (PEM)")
+	secFlags.key = fs.String("key", os.Getenv("CONCH_KEY"), "etcd TLS: client key (PEM)")
+	secFlags.user = fs.String("user", os.Getenv("CONCH_USER"), "etcd auth user; the password comes from CONCH_PASSWORD or --password-file")
+	secFlags.passwordFile = fs.String("password-file", os.Getenv("CONCH_PASSWORD_FILE"), "etcd auth: file holding the password")
 	return
+}
+
+// secFlags are the etcd security flags every subcommand takes.
+var secFlags struct {
+	caCert, cert, key, user, passwordFile *string
+}
+
+// applySecurity turns the security flags into core.SetSecurity, exiting 64
+// on a bad combination.
+func applySecurity() {
+	if secFlags.caCert == nil {
+		return
+	}
+	pw, err := core.ReadPassword(*secFlags.passwordFile, os.Getenv("CONCH_PASSWORD"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(64)
+	}
+	core.SetSecurity(core.Security{CACert: *secFlags.caCert, Cert: *secFlags.cert, Key: *secFlags.key, User: *secFlags.user, Password: pw})
+	if _, err := core.ClientConfig(nil, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(64)
+	}
 }
 
 func parseGlobalValues(endpointsStr, dialTimeoutStr, ttlStr *string, quietFlag *bool) (endpoints []string, dialTimeout, ttl time.Duration, quiet bool) {
@@ -108,6 +136,7 @@ func parseGlobalValues(endpointsStr, dialTimeoutStr, ttlStr *string, quietFlag *
 	}
 
 	quiet = *quietFlag
+	applySecurity()
 	return
 }
 
@@ -286,10 +315,7 @@ func handleElect(args []string) {
 }
 
 func runElectReadOnly(ctx context.Context, logger *slog.Logger, endpoints []string, dialTimeout time.Duration, office string, who, watch, assert bool, minRev int64, useJSON bool) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: dialTimeout,
-	})
+	cli, err := core.NewClient(endpoints, dialTimeout)
 	if err != nil {
 		logger.Error("failed to connect to etcd", "err", err)
 		os.Exit(69)
@@ -358,10 +384,7 @@ func handleSema(args []string) {
 	if *who {
 		setupSignalCancel(ctx, cancel)
 
-		cli, err := clientv3.New(clientv3.Config{
-			Endpoints:   endpoints,
-			DialTimeout: dialTimeout,
-		})
+		cli, err := core.NewClient(endpoints, dialTimeout)
 		if err != nil {
 			logger.Error("failed to connect to etcd", "err", err)
 			os.Exit(69)
@@ -431,10 +454,7 @@ func handleCron(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: dialTimeout,
-	})
+	cli, err := core.NewClient(endpoints, dialTimeout)
 	if err != nil {
 		logger.Error("failed to connect to etcd", "err", err)
 		os.Exit(69)

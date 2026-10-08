@@ -23,10 +23,7 @@ type CoreSession struct {
 }
 
 func NewCoreSession(ctx context.Context, endpoints []string, dialTimeout time.Duration, ttl time.Duration, logger *slog.Logger) (*CoreSession, error) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: dialTimeout,
-	})
+	cli, err := NewClient(endpoints, dialTimeout)
 	if err != nil {
 		return nil, err
 	}

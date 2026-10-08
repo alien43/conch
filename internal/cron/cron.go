@@ -474,10 +474,7 @@ type Conchd struct {
 }
 
 func NewConchd(endpoints []string, dialTimeout, ttl time.Duration, logger *slog.Logger) (*Conchd, error) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: dialTimeout,
-	})
+	cli, err := core.NewClient(endpoints, dialTimeout)
 	if err != nil {
 		return nil, err
 	}

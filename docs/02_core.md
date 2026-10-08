@@ -9,9 +9,19 @@ Everything every tool inherits. This file is authoritative; `00_design.md` sketc
 | `--endpoints` | `CONCH_ENDPOINTS` | `localhost:2379` |
 | `--dial-timeout` | `CONCH_DIAL_TIMEOUT` | `5s` |
 | `--quiet` | — | `false` |
+| `--cacert` | `CONCH_CACERT` | — (CA that signed etcd's server certificate) |
+| `--cert` / `--key` | `CONCH_CERT` / `CONCH_KEY` | — (client certificate, for `--client-cert-auth` etcd) |
+| `--user` | `CONCH_USER` | — (etcd auth) |
+| `--password-file` | `CONCH_PASSWORD_FILE` | — (or `CONCH_PASSWORD`; never a flag, it would show in `ps`) |
 
-Plain HTTP (matches the cluster's etcd; no TLS until etcd itself grows it). If no
-endpoint is reachable within the dial timeout: exit **69** without side effects.
+By default conch talks plain HTTP, unauthenticated, which matches the home cluster's etcd.
+With `--cacert` (and `--cert`/`--key` when etcd requires client certificates) it uses TLS:
+give `https://` endpoints. With `--user` it authenticates with etcd's user/password auth.
+The two combine. Every client conch opens uses the same settings (`core.ClientConfig`). A bad
+combination is refused at startup with exit **64**: `--cert` without `--key`, `--user` without
+a password, or an unreadable file. If no endpoint is reachable within the dial timeout: exit
+**69** without side effects. (Exception, pre-existing: the read-only modes `elect --who/--watch/
+--assert` have no timeout on their etcd calls and can hang. Run them under `timeout`.)
 
 ## 2. Session (lease)
 

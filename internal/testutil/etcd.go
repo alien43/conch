@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -131,4 +132,52 @@ func (te *TestEtcd) Stop() {
 		_ = te.Cmd.Process.Kill()
 		_ = te.Cmd.Wait()
 	}
+}
+
+// StartEtcdTLS starts an etcd that serves clients over TLS only, with the
+// given server certificate, requiring client certificates signed by caFile.
+// ClientURL is the https:// URL.
+func StartEtcdTLS(dataDir, certFile, keyFile, caFile string, clientTLS *tls.Config) (*TestEtcd, error) {
+	binaryPath, err := findEtcdBinary()
+	if err != nil {
+		return nil, err
+	}
+	clientPort, err := getFreePort()
+	if err != nil {
+		return nil, err
+	}
+	peerPort, err := getFreePort()
+	if err != nil {
+		return nil, err
+	}
+	clientURL := fmt.Sprintf("https://127.0.0.1:%d", clientPort)
+	peerURL := fmt.Sprintf("http://127.0.0.1:%d", peerPort)
+	cmd := exec.Command(binaryPath,
+		"--data-dir", dataDir,
+		"--listen-client-urls", clientURL, "--advertise-client-urls", clientURL,
+		"--listen-peer-urls", peerURL, "--initial-advertise-peer-urls", peerURL,
+		"--initial-cluster", fmt.Sprintf("default=%s", peerURL),
+		"--cert-file", certFile, "--key-file", keyFile,
+		"--trusted-ca-file", caFile, "--client-cert-auth",
+		"--log-level", "warn",
+	)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	for i := 0; i < 50; i++ {
+		cli, err := clientv3.New(clientv3.Config{Endpoints: []string{clientURL}, DialTimeout: 200 * time.Millisecond, TLS: clientTLS})
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			_, err = cli.Get(ctx, "/")
+			cancel()
+			cli.Close()
+			if err == nil {
+				return &TestEtcd{Cmd: cmd, ClientURL: clientURL, Port: clientPort}, nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	return nil, fmt.Errorf("TLS etcd did not become ready in time")
 }
