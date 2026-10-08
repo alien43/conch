@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -323,7 +324,9 @@ func runElectReadOnly(ctx context.Context, logger *slog.Logger, endpoints []stri
 	defer cli.Close()
 
 	if assert {
-		code, err := elect.CmdAssert(ctx, cli, office, minRev, useJSON)
+		octx, ocancel := oneShot(ctx, dialTimeout)
+		defer ocancel()
+		code, err := elect.CmdAssert(octx, cli, office, minRev, useJSON)
 		if err != nil {
 			logger.Error("assert failed", "err", err)
 			os.Exit(69)
@@ -332,7 +335,9 @@ func runElectReadOnly(ctx context.Context, logger *slog.Logger, endpoints []stri
 	}
 
 	if who {
-		code, err := elect.CmdWho(ctx, cli, office, useJSON)
+		octx, ocancel := oneShot(ctx, dialTimeout)
+		defer ocancel()
+		code, err := elect.CmdWho(octx, cli, office, useJSON)
 		if err != nil {
 			logger.Error("failed to get leader info", "err", err)
 			os.Exit(69)
@@ -341,6 +346,15 @@ func runElectReadOnly(ctx context.Context, logger *slog.Logger, endpoints []stri
 	}
 
 	if watch {
+		// The stream itself has no end, but an etcd we cannot use at all
+		// should exit 69, not wait forever: probe it once first.
+		octx, ocancel := oneShot(ctx, dialTimeout)
+		_, perr := cli.Get(octx, core.ElectPrefix(office), clientv3.WithCountOnly())
+		ocancel()
+		if perr != nil {
+			logger.Error("failed to watch leader", "err", perr)
+			os.Exit(69)
+		}
 		code, err := elect.CmdWatch(ctx, cli, office, useJSON)
 		if err != nil {
 			logger.Error("failed to watch leader", "err", err)
@@ -391,7 +405,9 @@ func handleSema(args []string) {
 		}
 		defer cli.Close()
 
-		code, err := sema.CmdWho(ctx, cli, name, *max, *useJSON)
+		octx, ocancel := oneShot(ctx, dialTimeout)
+		defer ocancel()
+		code, err := sema.CmdWho(octx, cli, name, *max, *useJSON)
 		if err != nil {
 			logger.Error("failed to get semaphore info", "err", err)
 			os.Exit(69)
@@ -451,7 +467,8 @@ func handleCron(args []string) {
 
 	endpoints, dialTimeout, _, _, logger := parseCommon(fs, wrapperArgs, nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// add, rm and ls are one-shot: bounded, so an unusable etcd exits 69.
+	ctx, cancel := oneShot(context.Background(), dialTimeout)
 	defer cancel()
 
 	cli, err := core.NewClient(endpoints, dialTimeout)
@@ -533,4 +550,12 @@ func handleConchd(args []string) {
 		logger.Error("conchd exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// oneShot bounds a one-shot CLI call. clientv3 dials lazily and retries an
+// RPC until its context ends, so without a deadline an etcd that can't be
+// used (down, wrong scheme, TLS refused) hangs the command instead of exiting
+// 69.
+func oneShot(ctx context.Context, dialTimeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, max(2*dialTimeout, 2*time.Second))
 }

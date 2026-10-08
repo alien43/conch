@@ -14,7 +14,7 @@ import (
 // TestCLIOverTLS: the --cacert/--cert/--key flags and the CONCH_* env reach
 // every client. Against a TLS-only etcd with client-cert auth, `elect --who`
 // on a vacant office exits 1 ("no leader") with them and 69 ("etcd
-// unreachable", or a hang) without; and a real `elect -- true` runs over TLS.
+// unreachable") without, in bounded time; and a real `elect -- true` runs over TLS.
 func TestCLIOverTLS(t *testing.T) {
 	conch := buildConch(t)
 	certs := testutil.NewCerts(t)
@@ -42,11 +42,22 @@ func TestCLIOverTLS(t *testing.T) {
 	tlsFlags := []string{"--cacert", certs.CA, "--cert", certs.ClientCert, "--key", certs.ClientKey}
 	base := []string{"elect", "tls-office", "--endpoints", etcd.ClientURL, "--dial-timeout", "2s"}
 
-	// Without TLS the read-only modes hang rather than exit 69: pre-existing
-	// (no timeout on their etcd calls), not about TLS. What matters here is
-	// that they never get an answer (-1: killed at the test's timeout).
-	if code := run(nil, append(base, "--who")...); code == 0 || code == 1 {
-		t.Errorf("--who without TLS: exit %d, want a failure (69, or killed)", code)
+	// Without TLS: exit 69 within the one-shot deadline (they used to hang).
+	start := time.Now()
+	if code := run(nil, append(base, "--who")...); code != 69 {
+		t.Errorf("--who without TLS: exit %d, want 69", code)
+	}
+	if took := time.Since(start); took > 6*time.Second {
+		t.Errorf("--who without TLS took %s; want ~2x the dial timeout", took)
+	}
+	if code := run(nil, append(base, "--watch")...); code != 69 {
+		t.Errorf("--watch without TLS: exit %d, want 69", code)
+	}
+	if code := run(nil, append(base, "--assert")...); code != 69 {
+		t.Errorf("--assert without TLS: exit %d, want 69", code)
+	}
+	if code := run(nil, "cron", "ls", "--endpoints", etcd.ClientURL, "--dial-timeout", "2s"); code != 69 {
+		t.Errorf("cron ls without TLS: exit %d, want 69", code)
 	}
 	if code := run(nil, append(append(base, tlsFlags...), "--who")...); code != 1 {
 		t.Errorf("--who with TLS flags: exit %d, want 1 (vacant)", code)

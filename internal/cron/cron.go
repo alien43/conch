@@ -108,7 +108,7 @@ func CmdAdd(ctx context.Context, client *clientv3.Client, name, scheduleExpr, ru
 	key := core.CronJobKey(name)
 	_, err = client.Put(ctx, key, string(bytes))
 	if err != nil {
-		return 1, err
+		return 69, err // etcd unreachable/unusable (02_core.md §5)
 	}
 
 	return 0, nil
@@ -118,7 +118,7 @@ func CmdRm(ctx context.Context, client *clientv3.Client, name string) (int, erro
 	key := core.CronJobKey(name)
 	resp, err := client.Delete(ctx, key)
 	if err != nil {
-		return 1, err
+		return 69, err
 	}
 	if resp.Deleted == 0 {
 		return 1, fmt.Errorf("job not found: %s", name)
@@ -414,7 +414,7 @@ func GetSemaStatus(ctx context.Context, client *clientv3.Client) ([]SemaStatusIt
 func CmdLs(ctx context.Context, client *clientv3.Client, showLast, useJSON bool) (int, error) {
 	items, err := GetCronStatus(ctx, client)
 	if err != nil {
-		return 1, err
+		return 69, err
 	}
 
 	if useJSON {

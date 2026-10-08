@@ -19,9 +19,11 @@ With `--cacert` (and `--cert`/`--key` when etcd requires client certificates) it
 give `https://` endpoints. With `--user` it authenticates with etcd's user/password auth.
 The two combine. Every client conch opens uses the same settings (`core.ClientConfig`). A bad
 combination is refused at startup with exit **64**: `--cert` without `--key`, `--user` without
-a password, or an unreadable file. If no endpoint is reachable within the dial timeout: exit
-**69** without side effects. (Exception, pre-existing: the read-only modes `elect --who/--watch/
---assert` have no timeout on their etcd calls and can hang. Run them under `timeout`.)
+a password, or an unreadable file. If etcd can't be used (down, the wrong scheme, TLS or auth refused): exit **69**
+without side effects. The one-shot commands (`elect --who/--assert`, the probe before
+`--watch`, `sema --who`, `cron add/rm/ls`) give up after `max(2 × --dial-timeout, 2s)`. Before
+2026-10-08 they had no deadline and hung, because clientv3 dials lazily and retries an RPC until
+its context ends.
 
 ## 2. Session (lease)
 
