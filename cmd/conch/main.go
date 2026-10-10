@@ -60,7 +60,7 @@ func printUsageAndExit() {
 	fmt.Fprintf(os.Stderr, `Usage: conch <subcommand> [options]
 
 Subcommands:
-  elect <office> [--restart] [--kill-after 5s] [--wait <dur>] [--nonblock] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] [--watchdog [--watchdog-heartbeat PATH --watchdog-stale D]] -- <cmd...>
+  elect <office> [--restart] [--kill-after 5s] [--wait <dur>] [--nonblock] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] [--watchdog [--watchdog-heartbeat PATH --watchdog-stale D]] [--campaign-after D] -- <cmd...>
   elect <office> --who [--json]
   elect <office> --watch [--json]
   elect <office> --assert [--min-rev N] [--json]
@@ -224,6 +224,7 @@ func handleElect(args []string) {
 	watchdog := fs.Bool("watchdog", false, "pet systemd's watchdog (WatchdogSec=) only while fit")
 	heartbeat := fs.String("watchdog-heartbeat", "", "with --watchdog: file the child touches; stale while holding = unfit")
 	staleStr := fs.String("watchdog-stale", "", "with --watchdog-heartbeat: how old the heartbeat may get")
+	campaignAfterStr := fs.String("campaign-after", "", "campaign only once the office has been vacant this long (static preference: lower for preferred hosts)")
 
 	wrapperArgs, childCmd := splitChildCmd(args)
 
@@ -309,6 +310,19 @@ func handleElect(args []string) {
 	} else if *heartbeat != "" || *staleStr != "" {
 		fmt.Fprintf(os.Stderr, "--watchdog-heartbeat/--watchdog-stale need --watchdog\n")
 		os.Exit(64)
+	}
+
+	if *campaignAfterStr != "" {
+		d, err := time.ParseDuration(*campaignAfterStr)
+		if err != nil || d < 0 {
+			fmt.Fprintf(os.Stderr, "invalid campaign-after: %q\n", *campaignAfterStr)
+			os.Exit(64)
+		}
+		if *nonblock && d > 0 {
+			fmt.Fprintf(os.Stderr, "--nonblock and --campaign-after cannot go together\n")
+			os.Exit(64)
+		}
+		fence.CampaignAfter = d
 	}
 
 	exitCode, _ := elect.RunElectFenced(ctx, logger, endpoints, dialTimeout, ttl, killAfter, *restart, office, waitLimit, 60*time.Second, *onAcquire, *onLose, hookTimeout, fence, childCmd)

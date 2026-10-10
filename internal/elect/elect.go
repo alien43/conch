@@ -12,6 +12,7 @@ import (
 
 	"github.com/alien43/conch/internal/core"
 
+	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 )
@@ -22,6 +23,11 @@ type ElectHolder struct {
 	val       string
 	election  *concurrency.Election
 	waitLimit time.Duration
+
+	// campaignAfter (--campaign-after) delays entering the election until the
+	// office has been vacant for this long; logger reports the delay.
+	campaignAfter time.Duration
+	logger        *slog.Logger
 }
 
 func NewElectHolder(sess *core.CoreSession, office string, val string, waitLimit time.Duration) *ElectHolder {
@@ -55,6 +61,17 @@ func (eh *ElectHolder) Acquire(ctx context.Context) (int64, error) {
 		}
 	}()
 
+	if eh.campaignAfter > 0 {
+		if err := eh.waitVacant(ctx); err != nil {
+			select {
+			case <-eh.sess.DoneCh:
+				return 0, errSessionLost
+			default:
+			}
+			return 0, err
+		}
+	}
+
 	if err := eh.election.Campaign(ctx, eh.val); err != nil {
 		select {
 		case <-eh.sess.DoneCh:
@@ -81,6 +98,75 @@ func (eh *ElectHolder) Acquire(ctx context.Context) (int64, error) {
 
 var errSessionLost = errors.New("session lost while campaigning: our candidate key is gone")
 
+// waitVacant returns once the office has had no key at all (no holder, no
+// queued candidate) for campaignAfter without a break, holding no key of its
+// own meanwhile. Any key put during the delay restarts it: whoever comes back
+// within it, even briefly, goes first. It only decides when to campaign; the
+// election itself is unchanged.
+func (eh *ElectHolder) waitVacant(ctx context.Context) error {
+	prefix := core.ElectPrefix(eh.office)
+	for {
+		resp, err := eh.sess.Client.Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithCountOnly())
+		if err != nil {
+			return err
+		}
+		if resp.Count > 0 {
+			if err := eh.watchUntil(ctx, prefix, resp.Header.Revision, clientv3.EventTypeDelete, 0); err != nil && !errors.Is(err, errWatchEvent) {
+				return err
+			}
+			continue // a key went: re-read whether the office is empty now
+		}
+		eh.logger.Info("campaign-delay", "name", eh.office, "delay", eh.campaignAfter)
+		switch err := eh.watchUntil(ctx, prefix, resp.Header.Revision, clientv3.EventTypePut, eh.campaignAfter); {
+		case err == nil:
+			return nil
+		case errors.Is(err, errWatchEvent):
+			eh.logger.Info("campaign-delay-reset", "name", eh.office)
+		default:
+			return err
+		}
+	}
+}
+
+var errWatchEvent = errors.New("watched event")
+
+// watchUntil watches prefix from just after rev. It returns errWatchEvent at
+// the first event of type typ, nil once quiet has passed without one (never,
+// if quiet is 0), and errWatchEvent too when the watch breaks (compaction,
+// reconnect), so the caller re-reads rather than trusting a gap.
+func (eh *ElectHolder) watchUntil(ctx context.Context, prefix string, rev int64, typ mvccpb.Event_EventType, quiet time.Duration) error {
+	wctx, cancel := context.WithCancel(clientv3.WithRequireLeader(ctx))
+	defer cancel()
+	wch := eh.sess.Client.Watch(wctx, prefix, clientv3.WithPrefix(), clientv3.WithRev(rev+1))
+	var timer <-chan time.Time
+	if quiet > 0 {
+		t := time.NewTimer(quiet)
+		defer t.Stop()
+		timer = t.C
+	}
+	for {
+		select {
+		case <-timer:
+			return nil
+		case wr, ok := <-wch:
+			if !ok {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return errWatchEvent
+			}
+			if wr.Err() != nil {
+				return errWatchEvent
+			}
+			for _, ev := range wr.Events {
+				if ev.Type == typ {
+					return errWatchEvent
+				}
+			}
+		}
+	}
+}
+
 func (eh *ElectHolder) Release(ctx context.Context) error {
 	return eh.election.Resign(ctx)
 }
@@ -99,10 +185,13 @@ func RunElect(ctx context.Context, logger *slog.Logger, endpoints []string, dial
 
 // Fence is `--fence CMD --fence-budget D`; a zero value means no fence.
 // Watchdog, if set, pets systemd only while conch is fit (`--watchdog`).
+// CampaignAfter is `--campaign-after D` (see ElectHolder.waitVacant); it rides
+// here to keep RunElectFenced's signature.
 type Fence struct {
-	Cmd      string
-	Budget   time.Duration
-	Watchdog *core.Watchdog
+	Cmd           string
+	Budget        time.Duration
+	Watchdog      *core.Watchdog
+	CampaignAfter time.Duration
 }
 
 // RunElectFenced is RunElect with a fence (core.RunConfig.Fence). A term whose
@@ -146,6 +235,7 @@ func RunElectFenced(ctx context.Context, logger *slog.Logger, endpoints []string
 		}
 
 		holder := NewElectHolder(sess, office, string(holderVal), waitLimit)
+		holder.campaignAfter, holder.logger = fence.CampaignAfter, logger
 
 		startTime := time.Now()
 

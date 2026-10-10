@@ -5,7 +5,7 @@ Run a command only while holding a named office; observe elections.
 ## Synopsis
 
 ```
-conch elect <office> [--ttl 10s] [--restart] [--kill-after 5s] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] [--watchdog [--watchdog-heartbeat PATH --watchdog-stale D]] -- <cmd...>
+conch elect <office> [--ttl 10s] [--restart] [--kill-after 5s] [--on-acquire CMD] [--on-lose CMD] [--hook-timeout 30s] [--fence CMD --fence-budget D] [--watchdog [--watchdog-heartbeat PATH --watchdog-stale D]] [--campaign-after D] -- <cmd...>
 conch elect <office> --who [--json]
 conch elect <office> --watch [--json]
 conch elect <office> --assert [--min-rev N] [--json]
@@ -113,6 +113,26 @@ conch sends `READY=1` once at start, so `Type=notify` works.
   another process, `--watchdog` logs `watchdog-disabled` and conch runs without it.
 * conch never opens `/dev/watchdog*`.
 
+### Campaign delay (`--campaign-after D`)
+
+etcd elections are first come, first served: the earliest queued candidate wins the next
+vacancy. `--campaign-after D` gives **static preference** without changing the election. A
+delayed candidate holds **no** key while the office has a holder or a queued candidate. It
+campaigns only after the office has been vacant, with no key at all under
+`/conch/v1/elect/<office>/`, for `D` **without a break**. Any key put during the delay restarts
+it, so a candidate with a shorter delay that comes back within `D`, even briefly, goes first.
+
+* Give preferred hosts a smaller `D` (e.g. `rank × grace`; the most preferred uses `0`, which
+  is the default, plain behaviour).
+* It applies to every campaign, including each re-campaign under `--restart`.
+* Preference acts only **at a vacancy**. It is not failback: a preferred host that comes back
+  while another holds the office waits for the next vacancy.
+* `--wait` bounds the whole acquisition, delay included. `--nonblock` with `D > 0` is a usage
+  error (exit 64).
+* While delaying, conch is "not holding" (fit for `--watchdog`), and nothing about the lease,
+  `--fence` or `CONCH_REV` changes.
+* It logs `campaign-delay` when the delay starts and `campaign-delay-reset` when it restarts.
+
 ### `--who`
 
 Prints the current leader's holder JSON (or, without `--json`, a single line
@@ -150,6 +170,7 @@ A read-only predicate to safely check if the current host holds leadership of an
 | `--watchdog` | off | pet systemd's watchdog only while fit (§ Watchdog) |
 | `--watchdog-heartbeat` | — | file the child touches; stale while holding = unfit |
 | `--watchdog-stale` | — | max heartbeat age; required with `--watchdog-heartbeat` |
+| `--campaign-after` | `0` | campaign only after the office has been vacant this long, unbroken (§ Campaign delay) |
 
 Plus core flags (`--endpoints`, `--ttl`, `--quiet`, `--json`).
 
