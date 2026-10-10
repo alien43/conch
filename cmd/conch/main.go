@@ -325,6 +325,10 @@ func handleElect(args []string) {
 		fence.CampaignAfter = d
 	}
 
+	// SIGINT/SIGTERM before winning must still close the session, so the
+	// candidate key goes at once instead of blocking the queue for a TTL. (While
+	// holding, the term's own handler stops the child and runs the fence.)
+	setupSignalCancel(ctx, cancel)
 	exitCode, _ := elect.RunElectFenced(ctx, logger, endpoints, dialTimeout, ttl, killAfter, *restart, office, waitLimit, 60*time.Second, *onAcquire, *onLose, hookTimeout, fence, childCmd)
 	os.Exit(exitCode)
 }
