@@ -24,10 +24,16 @@ import (
 // one round trip after etcd extended the lease, so a count started there is
 // late by that much.
 type leaseKeeper struct {
-	cli       *clientv3.Client
-	id        clientv3.LeaseID
-	interval  time.Duration
-	opTimeout time.Duration
+	cli *clientv3.Client
+	// perEndpoint, with more than one endpoint, has one client per endpoint.
+	// Each renewal goes to all of them at once and the first success counts:
+	// a single client keeps sending to a member whose connection hangs (gRPC
+	// cannot tell it is dead until its keepalive fires, which etcd limits to
+	// once per 5s), and would declare a healthy lease lost.
+	perEndpoint []*clientv3.Client
+	id          clientv3.LeaseID
+	interval    time.Duration
+	opTimeout   time.Duration
 
 	mu       sync.Mutex
 	lastSent time.Time // send time of the newest successful renewal (monotonic)
@@ -81,18 +87,54 @@ func (k *leaseKeeper) renew(ctx context.Context) error {
 	sent := k.now()
 	cctx, cancel := context.WithTimeout(ctx, k.opTimeout)
 	defer cancel()
-	resp, err := k.cli.KeepAliveOnce(cctx, k.id)
-	if err == nil && resp.TTL <= 0 {
-		err = rpctypes.ErrLeaseNotFound
+	clis := k.perEndpoint
+	if len(clis) == 0 {
+		clis = []*clientv3.Client{k.cli}
 	}
-	if err != nil {
-		if errors.Is(err, rpctypes.ErrLeaseNotFound) {
-			return errLeaseGone
+	type result struct {
+		ttl int64
+		err error
+	}
+	results := make(chan result, len(clis))
+	for _, c := range clis {
+		go func() {
+			resp, err := c.KeepAliveOnce(cctx, k.id)
+			if err == nil && resp.TTL <= 0 {
+				err = rpctypes.ErrLeaseNotFound
+			}
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{ttl: resp.TTL}
+		}()
+	}
+	var firstErr error
+	gone := false
+	for range clis {
+		r := <-results
+		if r.err == nil {
+			k.record(sent, r.ttl) // the first success; the others are cancelled
+			return nil
 		}
-		return err
+		if errors.Is(r.err, rpctypes.ErrLeaseNotFound) {
+			gone = true
+		}
+		if firstErr == nil {
+			firstErr = r.err
+		}
 	}
-	k.record(sent, resp.TTL)
-	return nil
+	if gone {
+		return errLeaseGone
+	}
+	return firstErr
+}
+
+// close closes the per-endpoint renewal clients.
+func (k *leaseKeeper) close() {
+	for _, c := range k.perEndpoint {
+		_ = c.Close()
+	}
 }
 
 // run renews every interval until ctx ends or etcd reports the lease gone,

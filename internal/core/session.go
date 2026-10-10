@@ -40,8 +40,21 @@ func NewCoreSession(ctx context.Context, endpoints []string, dialTimeout time.Du
 		cli.Close()
 		return nil, err
 	}
+	if len(endpoints) > 1 {
+		for _, ep := range endpoints {
+			c, err := NewClient([]string{ep}, dialTimeout)
+			if err != nil {
+				keeper.close()
+				_, _ = cli.Revoke(context.Background(), keeper.id)
+				cli.Close()
+				return nil, err
+			}
+			keeper.perEndpoint = append(keeper.perEndpoint, c)
+		}
+	}
 	sess, err := concurrency.NewSession(cli, concurrency.WithLease(keeper.id), concurrency.WithTTL(int(ttl.Seconds())))
 	if err != nil {
+		keeper.close()
 		_, _ = cli.Revoke(context.Background(), keeper.id)
 		cli.Close()
 		return nil, err
@@ -55,12 +68,20 @@ func NewCoreSession(ctx context.Context, endpoints []string, dialTimeout time.Du
 	// Create a combined Done channel
 	doneCh := make(chan struct{})
 
+	// Only the lease keeper decides that the lease is lost (monitorLease): it
+	// renews through every endpoint and holds the send-time bound. The
+	// concurrency session's own keepalive stream runs on the main client and
+	// is closed by the etcd client after one TTL without a response, which
+	// happens when that client's member hangs while the lease is fine.
 	go func() {
 		select {
 		case <-sess.Done():
-			logger.Warn("session done channel closed")
+			logger.Info("session keepalive stream ended; the lease keeper still renews")
 		case <-monitorCtx.Done():
 		}
+	}()
+	go func() {
+		<-monitorCtx.Done()
 		close(doneCh)
 	}()
 
@@ -95,6 +116,9 @@ func (cs *CoreSession) Abandon() {
 	if cs.stop != nil {
 		cs.stop()
 	}
+	if cs.keeper != nil {
+		cs.keeper.close()
+	}
 	if cs.Client != nil {
 		_ = cs.Client.Close()
 	}
@@ -106,6 +130,9 @@ func (cs *CoreSession) Close() {
 	}
 	if cs.Session != nil {
 		_ = cs.Session.Close()
+	}
+	if cs.keeper != nil {
+		cs.keeper.close()
 	}
 	if cs.Client != nil {
 		_ = cs.Client.Close()

@@ -56,7 +56,12 @@ func ClientConfig(endpoints []string, dialTimeout time.Duration) (clientv3.Confi
 	secMu.RLock()
 	s := sec
 	secMu.RUnlock()
-	cfg := clientv3.Config{Endpoints: endpoints, DialTimeout: dialTimeout, Username: s.User, Password: s.Password}
+	// gRPC keepalive, so a connection to a member that stopped answering is
+	// dropped and the client moves on (watches, campaigns) instead of hanging
+	// until TCP gives up. 5s is etcd's default --grpc-keepalive-min-time:
+	// pinging more often gets the connection closed by the server.
+	cfg := clientv3.Config{Endpoints: endpoints, DialTimeout: dialTimeout, Username: s.User, Password: s.Password,
+		DialKeepAliveTime: 5 * time.Second, DialKeepAliveTimeout: 3 * time.Second}
 	if (s.Cert == "") != (s.Key == "") {
 		return cfg, fmt.Errorf("etcd TLS: --cert and --key go together")
 	}
