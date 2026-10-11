@@ -70,6 +70,10 @@ func getExitCode(err error) int {
 	return 1
 }
 
+// ExitWithdrawn is returned when SIGTERM/SIGINT ends the wait for a hold:
+// 128+SIGTERM, as a shell reports a signalled process.
+const ExitWithdrawn = 143
+
 type Outcome string
 
 const (
@@ -182,8 +186,14 @@ func RunWithConfig(ctx context.Context, logger *slog.Logger, sess *CoreSession, 
 
 	rev, err := hold.Acquire(ctx)
 	if err != nil {
-		// If context was cancelled (e.g. timeout), return 75
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// Cancelled while waiting: a SIGTERM/SIGINT asked us to withdraw.
+		// 128+SIGTERM, as a shell reports a signalled process; not a failure.
+		if errors.Is(err, context.Canceled) {
+			logger.Info("withdrawn", "name", hold.Name(), "reason", "signalled while waiting")
+			return ExitWithdrawn, OutcomeContextCancelled, nil
+		}
+		// --wait ran out (or --nonblock): 75.
+		if errors.Is(err, context.DeadlineExceeded) {
 			logger.Error("acquire timed out or cancelled", "name", hold.Name(), "err", err)
 			return 75, OutcomeAcquireFailed, nil
 		}

@@ -51,8 +51,22 @@ func (eh *ElectHolder) Acquire(ctx context.Context) (int64, error) {
 	// our own key survived. Abort the wait when the session dies, and confirm
 	// the key afterwards, so a candidate whose lease expired while queued can't
 	// "win" an office it no longer holds.
+	outer := ctx
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	// A caller's cancel (a signal) or --wait running out closes the session
+	// too; report it as such, not as a lost key.
+	lost := func(err error) error {
+		if oerr := outer.Err(); oerr != nil {
+			return oerr
+		}
+		select {
+		case <-eh.sess.DoneCh:
+			return errSessionLost
+		default:
+		}
+		return err
+	}
 	go func() {
 		select {
 		case <-eh.sess.DoneCh:
@@ -63,22 +77,12 @@ func (eh *ElectHolder) Acquire(ctx context.Context) (int64, error) {
 
 	if eh.campaignAfter > 0 {
 		if err := eh.waitVacant(ctx); err != nil {
-			select {
-			case <-eh.sess.DoneCh:
-				return 0, errSessionLost
-			default:
-			}
-			return 0, err
+			return 0, lost(err)
 		}
 	}
 
 	if err := eh.election.Campaign(ctx, eh.val); err != nil {
-		select {
-		case <-eh.sess.DoneCh:
-			return 0, errSessionLost
-		default:
-		}
-		return 0, err
+		return 0, lost(err)
 	}
 
 	resp, err := eh.sess.Client.Get(ctx, eh.election.Key())

@@ -2,6 +2,7 @@ package elect
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -56,7 +57,11 @@ func TestSignalWhileCampaigningDropsTheKey(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- c.Wait() }()
 		select {
-		case <-done:
+		case err := <-done:
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != core.ExitWithdrawn {
+				t.Fatalf("%v: exit %v after SIGTERM while campaigning, want %d (withdrawn)", extra, err, core.ExitWithdrawn)
+			}
 		case <-time.After(5 * time.Second):
 			_ = c.Process.Kill()
 			t.Fatalf("%v: conch did not exit within 5s of SIGTERM while campaigning", extra)
