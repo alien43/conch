@@ -94,8 +94,10 @@ The value stored at any held key is one-line JSON:
 The single code path used by `elect`, `sema`, and `conchd`:
 
 1. Acquire hold (tool-specific). Record etcd **revision** of acquisition.
-2. Start child in its **own process group** (`Setpgid`), with the inherited environment
-   plus:
+2. Start child in its **own process group** (`Setpgid`), on conch's stdout/stderr — if either
+   has become unusable (nil or closed, so the child would start with that fd closed and exit
+   on its first write), on the ones conch started with instead, logging ERROR
+   `child-stdio-unusable` — with the inherited environment plus:
 
    | Var | Value |
    | :--- | :--- |

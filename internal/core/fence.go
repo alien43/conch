@@ -65,8 +65,7 @@ func RunFence(logger *slog.Logger, f FenceSpec, reason string) error {
 
 	cmd := exec.Command("/bin/sh", "-c", f.Cmd)
 	cmd.SysProcAttr = childProcAttr()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout, cmd.Stderr = childStdio(logger, f.Name)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("CONCH_NAME=%s", f.Name),
 		fmt.Sprintf("CONCH_REV=%d", f.Rev),
